@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Roteirizador MB · Roteirização automática de cargas</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css" />
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+<div class="app">
+
+  <!-- Top bar -->
+  <header class="topbar">
+    <div class="brand">
+      <div class="brand-mark">R</div>
+      <div>
+        Roteirizador MB
+        <small id="brand-sub">Nenhum arquivo carregado</small>
+      </div>
+    </div>
+
+    <div class="kpis" id="kpis"></div>
+
+    <div class="topbar-actions">
+      <input type="file" id="fileInputTop" accept=".csv,.xlsx,.xls" style="display:none" />
+      <input type="file" id="fileInputDetalhe" accept=".csv,.xlsx,.xls" style="display:none" />
+      <button class="btn btn-ghost btn-sm" id="btnImportarDetalhe" title="Opcional — pedido linha a linha por produto, pra calcular posição de palete">+ Detalhe do pedido (paletização)</button>
+      <button class="btn btn-ghost btn-sm" id="btnReimport">Importar novo pedido</button>
+      <button class="btn btn-accent" id="btnExport" disabled>Exportar para o JDE</button>
+    </div>
+  </header>
+
+  <!-- Body -->
+  <div class="body">
+
+    <!-- Sidebar -->
+    <aside class="sidebar">
+      <div class="tabs">
+        <button class="tab active" data-tab="rotas">Rotas</button>
+        <button class="tab" data-tab="config">Configurações</button>
+      </div>
+
+      <div class="tab-panel" id="panel-rotas">
+        <div id="rotas-empty" class="empty-state">
+          <h3>Nenhuma rota ainda</h3>
+          <p>Importe um pedido do JDE (CSV) para gerar as rotas automaticamente.</p>
+        </div>
+        <div id="rotas-content" style="display:none">
+          <div class="routes-toolbar">
+            <input type="text" id="routeSearch" placeholder="Buscar loja ou rota..." />
+            <button class="btn btn-line btn-sm" id="btnRecalcular">Reagrupar</button>
+          </div>
+          <div class="route-list" id="routeList"></div>
+        </div>
+      </div>
+
+      <div class="tab-panel hidden" id="panel-config">
+        <div class="config-section">
+          <h4>Veículos</h4>
+          <p class="hint">Capacidade máxima por câmara. É o limite que o motor de roteirização respeita ao agrupar lojas numa rota.</p>
+          <table class="cfg-table" id="tblVehicles">
+            <thead><tr><th>Código</th><th>Nome</th><th>M³</th><th>KG</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <div class="config-section">
+          <h4>Paradas por rota</h4>
+          <p class="hint">Limite máximo de lojas numa mesma rota, além de M³/KG/palete — evita rotas longas demais mesmo quando ainda cabe carga no veículo.</p>
+          <table class="cfg-table">
+            <tbody>
+              <tr><td>Máximo de paradas por rota</td><td><input type="number" id="cfgMaxStops" value="10" min="1" /></td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <div class="config-section">
+          <h4>Posições de palete por veículo</h4>
+          <p class="hint">Só entra na conta quando você importa o "Detalhe do pedido" (botão no topo). Sem isso, o motor usa só M³/KG.</p>
+          <table class="cfg-table" id="tblPallets">
+            <thead><tr><th>Veículo</th><th>Total</th><th>Congel.</th><th>Resfr.</th><th>Seco</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <div class="config-section">
+          <h4>Depósito padrão por zona</h4>
+          <p class="hint">Usado apenas como reserva — na prática o motor prioriza o depósito de origem que o próprio JDE já traz no arquivo (CALL.DEPOTID).</p>
+          <table class="cfg-table" id="tblZoneDepot">
+            <thead><tr><th>Zona</th><th>Depósito</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <div class="config-section">
+          <h4>Veículo padrão por zona</h4>
+          <p class="hint">Exceções ao veículo padrão (3/4) para regiões específicas.</p>
+          <table class="cfg-table" id="tblZoneVehicle">
+            <thead><tr><th>Zona</th><th>Veículo</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <div class="config-section">
+          <h4>Zonas com Truck liberado</h4>
+          <p class="hint">Quando uma rota estoura o limite do veículo padrão, o motor pode escalar para Truck nessas zonas.</p>
+          <div id="zoneTruckChips" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+        </div>
+
+        <div class="config-section">
+          <h4>Exceções de cross-dock</h4>
+          <p class="hint">Zonas específicas atendidas por um depósito diferente do que o JDE indicou (regra manual da operação).</p>
+          <table class="cfg-table" id="tblZoneOverride">
+            <thead><tr><th>Zona</th><th>Depósito</th><th>Obs.</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <div class="config-section">
+          <h4>Tempo &amp; velocidade estimados</h4>
+          <p class="hint">Usados só para estimar horários no arquivo de retorno — a distância é em linha reta × fator de rota, não roteirização viária real.</p>
+          <table class="cfg-table">
+            <tbody>
+              <tr><td>Carregamento (min)</td><td><input type="number" id="cfgLoadMin" value="60" /></td></tr>
+              <tr><td>Preparo até saída (min)</td><td><input type="number" id="cfgPrepMin" value="60" /></td></tr>
+              <tr><td>Velocidade média (km/h)</td><td><input type="number" id="cfgSpeed" value="45" /></td></tr>
+              <tr><td>Fator de rota (vs. linha reta)</td><td><input type="number" id="cfgRoadFactor" value="1.3" step="0.1" /></td></tr>
+              <tr><td>Tempo médio por parada (min)</td><td><input type="number" id="cfgStopMin" value="20" /></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Map -->
+    <main class="map-wrap">
+      <div id="map"></div>
+
+      <div class="map-overlay-empty" id="mapEmpty">
+        <div class="upload-card">
+          <h2>Comece importando o pedido do dia</h2>
+          <p>Suba o CSV exportado do JDE (Painel de Controle da Interface). O sistema agrupa as lojas em rotas automaticamente, respeitando capacidade de veículo e cross-dock.</p>
+          <label class="dropzone" id="dropzone" for="fileInput">
+            <strong>Clique para escolher o arquivo</strong> ou arraste aqui
+            <div class="fmt">.CSV ou .XLSX — colunas padrão do JDE (CUST.LAT / CUST.LONG / USER01 / USER02...)</div>
+          </label>
+          <input type="file" id="fileInput" accept=".csv,.xlsx,.xls" style="display:none" />
+        </div>
+      </div>
+
+      <div class="legend" id="legend" style="display:none">
+        <div class="legend-title">Rotas geradas</div>
+        <div id="legendRows"></div>
+      </div>
+    </main>
+
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<div class="modal-overlay" id="truckModal">
+  <div class="modal-card lp-modal">
+    <div class="lp-head">
+      <div>
+        <div class="lp-title" id="truckModalTitle">—</div>
+        <div class="lp-sub" id="truckModalSub"></div>
+      </div>
+      <div class="lp-head-right">
+        <div class="lp-status-pill" id="lpStatusPill">—</div>
+        <button class="btn btn-line btn-sm" id="truckModalClose">Fechar ✕</button>
+      </div>
+    </div>
+
+    <div id="lpCapacityPanel" class="lp-capacity-panel"></div>
+    <div id="lpNoDataWarning" class="lp-no-data-warning" style="display:none"></div>
+
+    <div id="truckSvgWrap" class="truck-svg-wrap"></div>
+
+    <div id="lpLegend" class="lp-legend"></div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+<script src="depots.js"></script>
+<script src="products.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

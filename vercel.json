@@ -1,0 +1,6 @@
+{
+  "functions": {
+    "api/optimize.js": { "maxDuration": 30 },
+    "api/tomtom.js": { "maxDuration": 30 }
+  }
+}
