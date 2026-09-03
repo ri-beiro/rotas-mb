@@ -175,27 +175,7 @@ button, input, select { font-family: inherit; }
   min-height: 0;
 }
 
-.tabs {
-  display: flex;
-  border-bottom: 1px solid var(--border);
-  padding: 0 12px;
-  flex-shrink: 0;
-}
-.tab {
-  padding: 13px 14px 11px;
-  font-size: 13px;
-  font-weight: 700;
-  color: var(--ink-faint);
-  background: none;
-  border: none;
-  cursor: pointer;
-  border-bottom: 2px solid transparent;
-  margin-bottom: -1px;
-}
-.tab.active { color: var(--primary); border-bottom-color: var(--accent); }
-
-.tab-panel { flex: 1; overflow-y: auto; min-height: 0; }
-.tab-panel.hidden { display: none; }
+#panel-rotas { flex: 1; overflow-y: auto; min-height: 0; }
 
 .empty-state {
   padding: 40px 24px;
@@ -246,7 +226,12 @@ button, input, select { font-family: inherit; }
   background: var(--surface-2);
 }
 .route-swatch { width: 10px; height: 10px; border-radius: 3px; flex-shrink: 0; }
-.route-code { font-family: var(--font-mono); font-weight: 600; font-size: 12.5px; }
+.route-code { font-family: var(--font-mono); font-weight: 600; font-size: 12.5px; cursor: text; }
+.route-code-placeholder { color: var(--ink-faint); font-style: italic; font-weight: 500; }
+.route-code-input {
+  font-family: var(--font-mono); font-weight: 600; font-size: 12.5px;
+  border: 1px solid var(--primary-2); border-radius: 4px; padding: 2px 5px; width: 120px;
+}
 .route-depot { font-size: 10.5px; color: var(--ink-faint); }
 .route-head .spacer { flex: 1; }
 .route-vehicle {
@@ -299,12 +284,82 @@ button, input, select { font-family: inherit; }
 .stop-name { font-weight: 600; flex: 1; }
 .stop-city { color: var(--ink-faint); font-size: 11px; }
 .stop-metric { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-soft); }
-.stop-move-select {
-  border: 1px solid var(--border); border-radius: 4px; background: var(--surface);
-  font-size: 10px; color: var(--ink-soft); padding: 2px 4px; max-width: 78px; flex-shrink: 0;
-}
-.stop-move-select:hover { border-color: var(--primary-2); }
 .stop-warn { color: var(--danger); font-size: 10.5px; }
+
+/* ---------- Janela de horário da loja ---------- */
+.horario-badge {
+  font-family: var(--font-mono); font-size: 10px; font-weight: 700;
+  padding: 2px 6px; border-radius: 4px; border: 1px solid transparent;
+  background: var(--surface-2); color: var(--ink-faint); cursor: pointer; flex-shrink: 0;
+  white-space: nowrap;
+}
+.horario-badge:hover { border-color: var(--primary-2); }
+.horario-badge.from { background: var(--warning-tint); color: var(--warning); border-color: rgba(180,121,15,0.3); }
+.horario-badge.exact { background: var(--danger-tint); color: var(--danger); border-color: rgba(193,67,43,0.3); }
+.horario-badge.violado { box-shadow: 0 0 0 1.5px var(--danger); }
+
+.horario-pop {
+  position: absolute; z-index: 200; background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius-md); box-shadow: var(--shadow-2); padding: 10px; font-size: 11.5px;
+  display: flex; flex-direction: column; gap: 6px; min-width: 190px;
+}
+.horario-pop select, .horario-pop input { border: 1px solid var(--border); border-radius: 4px; padding: 4px 6px; font-size: 11.5px; }
+.horario-pop .row { display: flex; align-items: center; gap: 6px; }
+.horario-pop .actions { display: flex; justify-content: flex-end; gap: 6px; margin-top: 2px; }
+
+.route-stop-count { font-family: var(--font-mono); font-size: 10px; padding: 1px 6px; border-radius: 20px; background: var(--surface-2); color: var(--ink-faint); }
+.route-stop-count.over { background: var(--danger-tint); color: var(--danger); font-weight: 700; }
+
+/* ---------- Encaixes (SA) ---------- */
+.sa-panel { border-bottom: 1px solid var(--border); background: var(--warning-tint); }
+.sa-panel-head {
+  display: flex; flex-direction: column; gap: 2px; padding: 10px 12px 6px;
+  font-size: 12.5px; font-weight: 700; color: var(--warning);
+}
+.sa-panel-head .hint { color: rgba(180,121,15,0.8); font-size: 10.5px; }
+.sa-count {
+  display: inline-block; margin-left: 4px; font-family: var(--font-mono); font-size: 10.5px;
+  background: var(--warning); color: #fff; border-radius: 20px; padding: 0 7px;
+}
+.sa-panel .route-stops { display: block; border-top: none; }
+.sa-panel .stop-row { background: transparent; }
+.sa-panel .stop-row:hover { background: rgba(255,255,255,0.5); }
+
+/* câmara detail por loja */
+.stop-cam-btn {
+  border: 1px solid var(--border); background: var(--surface); border-radius: 4px;
+  font-size: 10px; padding: 2px 5px; cursor: pointer; color: var(--ink-soft); flex-shrink: 0;
+}
+.stop-cam-btn:hover { border-color: var(--primary-2); color: var(--primary-2); }
+.stop-cam-detail {
+  padding: 8px 12px 10px 34px; background: var(--surface-2); border-bottom: 1px solid var(--border-soft);
+  font-size: 11px; display: flex; flex-direction: column; gap: 6px;
+}
+.stop-cam-detail .cam-row { display: flex; align-items: center; gap: 8px; }
+.stop-cam-detail .cam-label { width: 74px; flex-shrink: 0; color: var(--ink-soft); font-weight: 600; }
+.stop-cam-detail select, .stop-cam-detail input[type="number"] {
+  border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px; font-size: 11px;
+}
+.stop-cam-detail .btn-sm { padding: 4px 9px; font-size: 11px; }
+
+/* ---------- Modal genérico (config / gerenciar rotas) ---------- */
+.config-modal, .swap-modal {
+  background: var(--surface); border-radius: 10px; box-shadow: var(--shadow-2);
+  width: 100%; max-width: 720px; max-height: 88vh; padding: 0; overflow: hidden;
+  border: 1px solid var(--border); display: flex; flex-direction: column;
+}
+.config-modal-body { overflow-y: auto; }
+.swap-modal { max-width: 1080px; }
+.swap-modal-body {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 0; overflow: hidden; flex: 1; min-height: 0;
+}
+.swap-col { overflow-y: auto; padding: 10px; min-height: 0; }
+.swap-col:first-child { border-right: 1px solid var(--border); }
+.swap-col-title { font-size: 11px; font-weight: 700; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.04em; padding: 4px 4px 10px; }
+@media (max-width: 720px) {
+  .swap-modal-body { grid-template-columns: 1fr; }
+  .swap-col:first-child { border-right: none; border-bottom: 1px solid var(--border); }
+}
 
 /* ---------- Config tab ---------- */
 .config-section { padding: 16px; border-bottom: 1px solid var(--border-soft); overflow-x: auto; }

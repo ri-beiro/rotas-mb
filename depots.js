@@ -48,6 +48,10 @@ const DEFAULT_ZONE_VEHICLE = {
 // Zonas em que TRUCK é liberado quando a rota estoura o limite do veículo padrão (rotas longas)
 const DEFAULT_ZONE_ALLOW_TRUCK = ["BA", "MT", "AM", "PI", "CE", "PE", "GO", "DF", "NO", "TM", "SM", "LT"];
 
+// Limite de paradas por rota, por zona — sobrepõe o "Máximo de paradas por rota" geral da tela
+// de Configurações só pra zonas listadas aqui (ex.: MG limitado a 7 paradas por operação local).
+const DEFAULT_ZONE_MAX_STOPS = { MG: 7 };
+
 // Exceções de cross-dock: zona que deve ser atendida por um depósito diferente do que o
 // JDE indicou em CALL.DEPOTID (regra manual da operação).
 // Ex: em SP, lojas das zonas CP/NT/SO/PC eram atendidas por Jundiaí no processo antigo — como

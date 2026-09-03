@@ -44,13 +44,56 @@ com a estimativa local, já que as funções serverless não existem fora de um 
 1. Importe o pedido exportado do JDE (Painel de Controle da Interface) — aceita `.csv` ou `.xlsx`.
 2. O motor agrupa as lojas em rotas automaticamente, respeitando:
    - o depósito de origem que o próprio JDE já define (`CALL.DEPOTID`),
-   - exceções de cross-dock cadastradas na aba Configurações,
-   - capacidade de M³ e KG por tipo de veículo,
+   - exceções de cross-dock cadastradas em Configurações (botão no topo),
+   - capacidade de M³, KG e posições de palete por câmara, por tipo de veículo,
+   - limite de paradas por rota (geral ou por zona — ex.: MG limitado a 7),
+   - horário de entrega obrigatório da loja (ver seção abaixo),
    - distância e tempo reais de viagem (via TomTom, ou ORS se configurado).
 3. Revise no mapa e na lista de rotas — arraste uma loja de uma rota para outra se precisar
    ajustar (isso volta aquela rota para estimativa local, já que a sequência real precisaria
-   ser recalculada — use "Reagrupar" para mandar tudo de volta pra API).
+   ser recalculada — use "Reagrupar" para mandar tudo de volta pra API). O botão "⇄ Trocar
+   lojas" abre duas cópias da lista de rotas lado a lado, com mais espaço pra arrastar entre
+   rotas distantes na lista.
 4. Clique em "Exportar para o JDE" para gerar o CSV de retorno.
+
+## Horário de entrega da loja (Call.ORDDETS1)
+
+A coluna `CALL.ORDDETS1` do pedido traz um horário (`HH:MM`) onde o "MM" na verdade é um código
+da operação, não minuto de verdade:
+
+- **`01`** — a loja só recebe **a partir** daquele horário (ex.: `10:01` → a partir das 10:00).
+- **`02`** — a loja só recebe **exatamente** naquele horário (ex.: `10:02` → só às 10:00, nem
+  antes nem depois).
+- Qualquer outro valor (ou em branco) é só referência, não vira restrição.
+
+Na lista de rotas, cada loja mostra um selo de horário (🕐) — laranja para "a partir de",
+vermelho para "exatamente", e um contorno vermelho extra se a sequência calculada não bate com
+o horário. Clique no selo pra editar o horário e o tipo de restrição manualmente. Os horários
+obrigatórios entram como restrição real no motor de roteirização (inclusive no ORS/VROOM, via
+`time_windows`, quando a chave estiver configurada); nos motores TomTom/local — que não resolvem
+janela de horário nativamente — o sistema reordena as paradas pra tentar respeitar a cronologia
+das janelas e sinaliza com um aviso quando não é totalmente possível.
+
+## Encaixes (SA) e rota em branco
+
+Quando uma linha do pedido chega sem rota definida (ou marcada "EXT"), ela é tratada como um
+encaixe ("SA") e aparece num painel próprio acima da lista de rotas, pra ser arrastada loja por
+loja pra uma rota existente. *(Nesta versão o painel já existe mas a detecção — qual coluna do
+arquivo indica isso — ainda depende de confirmação com uma planilha de exemplo real.)*
+
+Use o botão "+ Rota" pra criar uma rota em branco (nome vazio, editável) — útil tanto para
+receber encaixes quanto para dividir a carga de uma loja que não cabe inteira num veículo
+menor. Clique no nome de qualquer rota pra renomeá-la.
+
+## Dividir a carga de uma loja por câmara
+
+Com o "Detalhe do pedido" importado, cada loja na lista de rotas mostra um botão 📦 com o total
+de posições de palete. Clicar nele abre a quebra por câmara (congelado/resfriado/seco) e permite
+mover só uma parte pra outra rota — útil quando o veículo é limitado (ex.: só cabe 3/4 num local)
+e a loja não cabe inteira num só caminhão: uma parte segue numa rota, o resto noutra. O m³/kg/caixas
+movido é uma aproximação proporcional à fração de paletes (o pedido principal não separa m³/kg
+por câmara linha a linha). Por segurança, o CSV de exportação fica bloqueado enquanto existir
+uma divisão desse tipo pendente — mova a loja inteira (não dividida) antes de exportar.
 
 ## Arquivos
 

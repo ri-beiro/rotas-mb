@@ -27,6 +27,7 @@
       <input type="file" id="fileInputDetalhe" accept=".csv,.xlsx,.xls" style="display:none" />
       <button class="btn btn-ghost btn-sm" id="btnImportarDetalhe" title="Opcional — pedido linha a linha por produto, pra calcular posição de palete">+ Detalhe do pedido (paletização)</button>
       <button class="btn btn-ghost btn-sm" id="btnReimport">Importar novo pedido</button>
+      <button class="btn btn-ghost btn-sm" id="btnConfig" title="Veículos, depósitos, zonas e limites — fica salvo, não precisa mexer todo dia">⚙ Configurações</button>
       <button class="btn btn-accent" id="btnExport" disabled>Exportar para o JDE</button>
     </div>
   </header>
@@ -36,12 +37,7 @@
 
     <!-- Sidebar -->
     <aside class="sidebar">
-      <div class="tabs">
-        <button class="tab active" data-tab="rotas">Rotas</button>
-        <button class="tab" data-tab="config">Configurações</button>
-      </div>
-
-      <div class="tab-panel" id="panel-rotas">
+      <div id="panel-rotas">
         <div id="rotas-empty" class="empty-state">
           <h3>Nenhuma rota ainda</h3>
           <p>Importe um pedido do JDE (CSV) para gerar as rotas automaticamente.</p>
@@ -49,13 +45,30 @@
         <div id="rotas-content" style="display:none">
           <div class="routes-toolbar">
             <input type="text" id="routeSearch" placeholder="Buscar loja ou rota..." />
+            <button class="btn btn-line btn-sm" id="btnNovaRota" title="Cria uma rota em branco pra encaixar lojas manualmente">+ Rota</button>
+            <button class="btn btn-line btn-sm" id="btnGerenciarRotas" title="Abre duas listas de rotas lado a lado, pra arrastar lojas entre elas com mais espaço">⇄ Trocar lojas</button>
             <button class="btn btn-line btn-sm" id="btnRecalcular">Reagrupar</button>
+          </div>
+          <div class="sa-panel" id="saPanel" style="display:none">
+            <div class="sa-panel-head">
+              <span>📦 Encaixes (SA) <span class="sa-count" id="saCount">0</span></span>
+              <span class="hint" style="margin:0">Rota em branco ou "EXT" no pedido — arraste pra uma rota</span>
+            </div>
+            <div class="route-stops" id="saList"></div>
           </div>
           <div class="route-list" id="routeList"></div>
         </div>
       </div>
+    </aside>
 
-      <div class="tab-panel hidden" id="panel-config">
+    <!-- Config modal -->
+    <div class="modal-overlay" id="configModal">
+      <div class="modal-card config-modal">
+        <div class="lp-head">
+          <div class="lp-title">Configurações</div>
+          <button class="btn btn-line btn-sm" id="configModalClose">Fechar ✕</button>
+        </div>
+        <div class="config-modal-body">
         <div class="config-section">
           <h4>Veículos</h4>
           <p class="hint">Capacidade máxima por câmara. É o limite que o motor de roteirização respeita ao agrupar lojas numa rota.</p>
@@ -67,11 +80,20 @@
 
         <div class="config-section">
           <h4>Paradas por rota</h4>
-          <p class="hint">Limite máximo de lojas numa mesma rota, além de M³/KG/palete — evita rotas longas demais mesmo quando ainda cabe carga no veículo.</p>
+          <p class="hint">Limite máximo de lojas numa mesma rota, além de M³/KG/palete — evita rotas longas demais mesmo quando ainda cabe carga no veículo. O limite abaixo vale como padrão geral; zonas na tabela seguinte usam o valor próprio delas (ex.: MG limitado a 7).</p>
           <table class="cfg-table">
             <tbody>
-              <tr><td>Máximo de paradas por rota</td><td><input type="number" id="cfgMaxStops" value="10" min="1" /></td></tr>
+              <tr><td>Máximo de paradas por rota (padrão)</td><td><input type="number" id="cfgMaxStops" value="10" min="1" /></td></tr>
             </tbody>
+          </table>
+        </div>
+
+        <div class="config-section">
+          <h4>Paradas máximas por zona (exceções)</h4>
+          <p class="hint">Sobrepõe o limite padrão acima só pra zonas específicas — ex.: MG limitado a 7 paradas por rota.</p>
+          <table class="cfg-table" id="tblZoneMaxStops">
+            <thead><tr><th>Zona</th><th>Máx. paradas</th></tr></thead>
+            <tbody></tbody>
           </table>
         </div>
 
@@ -130,8 +152,39 @@
             </tbody>
           </table>
         </div>
+
+        <div class="config-section">
+          <h4>Janela de horário da loja</h4>
+          <p class="hint">Vem de "Call.ORDDETS1" no pedido. Minutos "01" = a loja só recebe a partir daquele horário em diante; minutos "02" = a loja só recebe exatamente naquele horário. O motor trata os dois como obrigatórios ao montar as rotas — a tolerância abaixo é a margem (em minutos) usada só pra avisar quando uma rota calculada não bate direitinho com o horário exato.</p>
+          <table class="cfg-table">
+            <tbody>
+              <tr><td>Tolerância p/ horário exato (min)</td><td><input type="number" id="cfgWindowTolerance" value="10" min="0" /></td></tr>
+            </tbody>
+          </table>
+        </div>
+        </div>
       </div>
-    </aside>
+    </div>
+
+    <!-- Trocar lojas entre rotas: duas listas espelhadas lado a lado, pra arrastar com mais espaço -->
+    <div class="modal-overlay" id="swapModal">
+      <div class="modal-card swap-modal">
+        <div class="lp-head">
+          <div class="lp-title">Trocar lojas entre rotas</div>
+          <button class="btn btn-line btn-sm" id="swapModalClose">Fechar ✕</button>
+        </div>
+        <div class="swap-modal-body">
+          <div class="swap-col">
+            <div class="swap-col-title">Rotas</div>
+            <div class="route-list" id="swapListA"></div>
+          </div>
+          <div class="swap-col">
+            <div class="swap-col-title">Rotas (arraste aqui pra mover)</div>
+            <div class="route-list" id="swapListB"></div>
+          </div>
+        </div>
+      </div>
+    </div>
 
     <!-- Map -->
     <main class="map-wrap">

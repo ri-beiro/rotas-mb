@@ -17,6 +17,7 @@ const state = {
   _runToken: 0,
   hasPalletData: false,
   detalhePorLoja: null, // codigo da loja -> {congelado, resfriado, seco, total}
+  saStores: [], // lojas "encaixe" (rota em branco/EXT no pedido) — ver nota em importRows()
 };
 
 const PALETTE = [
@@ -26,11 +27,12 @@ const PALETTE = [
 ];
 
 /* ---------------- Config persistence ---------------- */
-function loadConfig() {
-  try {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    if (saved) return saved;
-  } catch (e) {}
+// As configurações (veículos, depósitos, zonas, limites) ficam salvas no navegador e não se
+// perdem de um dia pro outro — só a importação do pedido (rotas do dia) é que é sempre nova.
+// O merge campo-a-campo (em vez de só usar o que foi salvo) garante que, se um campo novo for
+// adicionado numa atualização do sistema, quem já tinha configuração salva não perde esse campo
+// (ele entra com o valor padrão em vez de ficar undefined).
+function defaultConfig() {
   return {
     depots: DEFAULT_DEPOTS.map(d => ({ ...d })),
     vehicles: DEFAULT_VEHICLES.map(v => ({ ...v })),
@@ -38,8 +40,18 @@ function loadConfig() {
     zoneVehicle: { ...DEFAULT_ZONE_VEHICLE },
     zoneAllowTruck: [...DEFAULT_ZONE_ALLOW_TRUCK],
     zoneOverrides: DEFAULT_ZONE_OVERRIDES.map(z => ({ ...z })),
+    zoneMaxStops: { ...DEFAULT_ZONE_MAX_STOPS },
     loadMin: 60, prepMin: 60, speedKmh: 45, roadFactor: 1.3, stopMin: 20, maxStopsPerRoute: 10,
+    windowToleranceMin: 10,
   };
+}
+function loadConfig() {
+  const defaults = defaultConfig();
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
+    if (saved && typeof saved === "object") return { ...defaults, ...saved };
+  } catch (e) {}
+  return defaults;
 }
 function saveConfig() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(state.config));
@@ -73,10 +85,110 @@ function depotBySigla(sigla) {
   return state.config.depots.find(d => d.sigla === sigla);
 }
 
+/* ---------------- Janela de horário de entrega da loja (Call.ORDDETS1) ----------------
+   O valor vem como um horário (HH:MM), mas o "MM" não é minuto de verdade — é um código da
+   operação: "01" = a loja só recebe A PARTIR daquele horário (sem limite máximo); "02" = a
+   loja só recebe EXATAMENTE naquele horário (nem antes, nem depois). Qualquer outro valor (ou
+   em branco) é só referência, sem virar restrição na roteirização. */
+function parseHorarioJde(raw) {
+  if (raw === undefined || raw === null) return null;
+  const str = String(raw).trim();
+  if (!str) return null;
+  // Aceita "10:02", "10.02", "10h02" ou dígitos corridos ("1002", "802") — sempre HH + código
+  // de 2 dígitos, com backtrack automático pra hora de 1 dígito quando faltar dígito (ex: "802").
+  const m = str.match(/^(\d{1,2})[:h.]?(\d{2})$/i);
+  if (!m) return null;
+  const hour = parseInt(m[1], 10);
+  const code = m[2];
+  if (isNaN(hour) || hour < 0 || hour > 23) return null;
+  const type = code === "01" ? "from" : code === "02" ? "exact" : "free";
+  return { hour, type };
+}
+
+function effectiveHorario(store) {
+  return store.horarioOverride || store.horario || null;
+}
+
+function horarioLabel(h) {
+  if (!h) return "Sem horário preferencial";
+  const hh = String(h.hour).padStart(2, "0") + ":00";
+  if (h.type === "from") return `Obrigatório — só recebe a partir de ${hh}`;
+  if (h.type === "exact") return `Obrigatório — só recebe exatamente às ${hh}`;
+  return `Preferência: ${hh} (não obrigatório)`;
+}
+
+function horarioBadgeText(h) {
+  if (!h) return "🕐 —";
+  const hh = String(h.hour).padStart(2, "0") + ":00";
+  if (h.type === "from") return `🕐 ≥ ${hh}`;
+  if (h.type === "exact") return `🕐 = ${hh}`;
+  return `🕐 ${hh}`;
+}
+
+// Pequena correção de ordem: entre paradas com janela obrigatória (from/exact), garante que
+// a sequência siga a ordem cronológica das janelas — sem isso o motor (sobretudo os fallbacks
+// TomTom/local, que não resolvem janela de horário nativamente) poderia visitar uma loja das
+// 14h antes de uma loja das 09h só por estarem geograficamente próximas.
+function enforceWindowOrder(orderedStores) {
+  const arr = [...orderedStores];
+  let changed = true, guard = 0;
+  while (changed && guard < 300) {
+    changed = false; guard++;
+    for (let i = 0; i < arr.length - 1; i++) {
+      const hA = effectiveHorario(arr[i]);
+      const hB = effectiveHorario(arr[i + 1]);
+      if (hA && hB && hA.type !== "free" && hB.type !== "free" && hA.hour > hB.hour) {
+        [arr[i], arr[i + 1]] = [arr[i + 1], arr[i]];
+        changed = true;
+      }
+    }
+  }
+  return arr;
+}
+
+// Confere, pelo horário de chegada estimado (buildTimeline), se cada loja com janela obrigatória
+// foi respeitada — marca a loja e a rota como "violado" pra dar destaque visual, já que nem
+// sempre dá pra cumprir 100% (rotas compartilhadas por várias lojas com janelas apertadas).
+function validateRouteWindows(route) {
+  route._horarioViolado = false;
+  if (!route.stores.length) return;
+  const tl = buildTimeline(route);
+  const tolMs = (state.config.windowToleranceMin || 10) * 60000;
+  tl.arrivals.forEach(({ store, arrival }) => {
+    store._horarioViolado = false;
+    const h = effectiveHorario(store);
+    if (!h || h.type === "free") return;
+    const target = new Date(arrival);
+    target.setHours(h.hour, 0, 0, 0);
+    if (h.type === "from") {
+      if (arrival.getTime() + 1000 < target.getTime()) store._horarioViolado = true;
+    } else if (h.type === "exact") {
+      if (Math.abs(arrival.getTime() - target.getTime()) > tolMs) store._horarioViolado = true;
+    }
+    if (store._horarioViolado) route._horarioViolado = true;
+  });
+}
+
 /* ---------------- CSV import & aggregation ---------------- */
 // Lê .csv (via PapaParse) ou .xlsx/.xls (via SheetJS) e devolve sempre um array de objetos
 // {coluna: valor}, igual nos dois formatos, pros parsers de importRows/importDetalhe não
 // precisarem saber a diferença.
+// Detecta se o .csv é UTF-8 ou Latin-1/CP1252 antes de ler — sem isso, um arquivo salvo no
+// encoding "errado" faz colunas com acento (é o caso de "2º Nº do Item" no Detalhe do pedido)
+// não baterem com o esperado, e a importação falha com um erro confuso de "coluna não
+// encontrada" sem ficar claro o motivo. Um UTF-8 válido decodifica sem erro em modo estrito;
+// Latin-1/CP1252 de verdade (bytes soltos fora de sequência UTF-8) não decodifica.
+function detectCsvEncoding(buffer) {
+  const bytes = new Uint8Array(buffer);
+  if (bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) return "UTF-8"; // BOM explícito
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+    return "UTF-8";
+  } catch (e) {
+    return "ISO-8859-1";
+  }
+}
+
 function readTabularFile(file, onRows, onError) {
   const isExcel = /\.xlsx?$/i.test(file.name);
   if (isExcel) {
@@ -92,11 +204,15 @@ function readTabularFile(file, onRows, onError) {
     reader.onerror = () => onError(new Error("Falha ao ler o arquivo Excel."));
     reader.readAsArrayBuffer(file);
   } else {
-    Papa.parse(file, {
-      header: true, skipEmptyLines: true, encoding: "ISO-8859-1",
-      complete: (res) => onRows(res.data),
-      error: onError,
-    });
+    file.arrayBuffer()
+      .then(buf => {
+        Papa.parse(file, {
+          header: true, skipEmptyLines: true, encoding: detectCsvEncoding(buf),
+          complete: (res) => onRows(res.data),
+          error: onError,
+        });
+      })
+      .catch(onError);
   }
 }
 
@@ -136,7 +252,9 @@ function importRows(rows, fileName) {
         origemJde: (r["CALL.DEPOTID"] || "").trim().toUpperCase(),
         lat, lng,
         peso: 0, m3: 0, caixas: 0,
-        horario: r["CALL.ORDDETS1"] || "",
+        horarioRaw: r["CALL.ORDDETS1"] || "",
+        horario: parseHorarioJde(r["CALL.ORDDETS1"]),
+        horarioOverride: null,
         rows: [],
       });
     }
@@ -148,6 +266,14 @@ function importRows(rows, fileName) {
   }
 
   state.stores = Array.from(byStore.values());
+
+  // "Encaixes (SA)": lojas cuja rota já vem em branco ou "EXT" no pedido do JDE (não entraram
+  // na roteirização automática do dia — encaixe manual noutra rota). A coluna exata que carrega
+  // essa informação no arquivo ainda precisa ser confirmada numa planilha de exemplo real antes
+  // de ligar a detecção aqui (classificar errado numa planilha de produção é pior que não
+  // classificar) — o painel "Encaixes" já existe na tela, só fica vazio até isso ser confirmado.
+  state.saStores = [];
+
   document.getElementById("brand-sub").textContent =
     `${fileName} · ${state.stores.length} lojas`;
 
@@ -255,6 +381,10 @@ function resolveVehicleForStore(store) {
   return state.config.zoneVehicle[store.zona] || "3/4";
 }
 
+function maxStopsForZone(zona) {
+  return state.config.zoneMaxStops[zona] || state.config.maxStopsPerRoute || 10;
+}
+
 /* ---------------- Clustering engine (varredura polar + bin packing) ---------------- */
 /* ---------------- Motor de roteirização: ORS/VROOM → TomTom → local ---------------- */
 const ORS_ENDPOINT = "/api/optimize";
@@ -341,24 +471,36 @@ function setBusy(isBusy) {
 
 /* ---- Caminho 1: OpenRouteService / VROOM (rotas reais) ---- */
 async function optimizeGroupViaORS(depot, vehicle, stores, zona) {
-  const vehicleCount = estimateVehicleCount(vehicle, stores);
+  const vehicleCount = estimateVehicleCount(vehicle, stores, zona);
   const profile = vehicle.codigo === "TRUCK" ? "driving-hgv" : "driving-car";
   const serviceSec = Math.round((state.config.stopMin || 20) * 60);
 
+  // Mesma linha do tempo usada no timeline de exportação (buildTimeline): carregamento + preparo
+  // antes de sair do depósito. Janela de horário obrigatória da loja (from/exact) vira restrição
+  // real pro VROOM, na mesma escala de segundos-do-dia que a janela do veículo.
+  const depotDepartSec = Math.round(((state.config.loadMin || 0) + (state.config.prepMin || 0)) * 60);
+  const dayEndSec = depotDepartSec + 16 * 3600;
+  const toleranceSec = (state.config.windowToleranceMin || 10) * 60;
+
   const payload = {
-    jobs: stores.map((s, i) => ({
-      id: i + 1,
-      location: [s.lng, s.lat],
-      delivery: deliveryVector(s),
-      service: serviceSec,
-    })),
+    jobs: stores.map((s, i) => {
+      const job = { id: i + 1, location: [s.lng, s.lat], delivery: deliveryVector(s), service: serviceSec };
+      const h = effectiveHorario(s);
+      if (h && h.type === "from") {
+        job.time_windows = [[Math.max(depotDepartSec, h.hour * 3600), dayEndSec]];
+      } else if (h && h.type === "exact") {
+        job.time_windows = [[Math.max(depotDepartSec, h.hour * 3600 - toleranceSec), h.hour * 3600 + toleranceSec]];
+      }
+      return job;
+    }),
     vehicles: Array.from({ length: vehicleCount }, (_, i) => ({
       id: i + 1,
       profile,
       start: [depot.long, depot.lat],
       end: [depot.long, depot.lat],
       capacity: capacityVector(vehicle),
-      max_tasks: state.config.maxStopsPerRoute || 10,
+      max_tasks: maxStopsForZone(zona),
+      time_window: [depotDepartSec, dayEndSec],
     })),
     options: { g: true },
   };
@@ -410,7 +552,7 @@ async function optimizeGroupViaORS(depot, vehicle, stores, zona) {
   return routes;
 }
 
-function estimateVehicleCount(vehicle, stores) {
+function estimateVehicleCount(vehicle, stores, zona) {
   const totalM3 = stores.reduce((a, s) => a + s.m3, 0);
   const totalKg = stores.reduce((a, s) => a + s.peso, 0);
   const byM3 = Math.ceil(totalM3 / vehicle.m3);
@@ -427,7 +569,7 @@ function estimateVehicleCount(vehicle, stores) {
       Math.ceil(totalSec / (vehicle.palletSeco || 1)),
       Math.ceil(totalPal / (vehicle.palletTotal || 1)));
   }
-  estimate = Math.max(estimate, Math.ceil(stores.length / (state.config.maxStopsPerRoute || 10)));
+  estimate = Math.max(estimate, Math.ceil(stores.length / maxStopsForZone(zona)));
   estimate += 2; // folga pra evitar "unassigned"
   return Math.min(estimate, stores.length);
 }
@@ -468,7 +610,7 @@ async function optimizeGroupViaTomTom(depot, vehicle, stores, zona) {
   const travelMode = vehicle.codigo === "TRUCK" ? "truck" : "car";
   // separa em "lotes" já respeitando capacidade (mesma lógica de bin-packing do fallback local) —
   // a matriz do TomTom tem limite de tamanho, então cada rota candidata vira uma chamada pequena.
-  const bins = binPackByCapacity(depot, vehicle, stores);
+  const bins = binPackByCapacity(depot, vehicle, stores, zona);
   const routes = [];
 
   for (const bin of bins) {
@@ -479,7 +621,7 @@ async function optimizeGroupViaTomTom(depot, vehicle, stores, zona) {
     if (bin.length > 24) {
       // lote grande demais pra matriz síncrona — ordena por vizinho mais próximo (haversine) e
       // ainda assim busca a rota real (geometria/tempo) via Calculate Route.
-      const ordered = twoOptStops(depot, nearestNeighborHaversine(depot, bin), (a, b) => haversineKm(a.lat, a.lng, b.lat, b.lng));
+      const ordered = enforceWindowOrder(twoOptStops(depot, nearestNeighborHaversine(depot, bin), (a, b) => haversineKm(a.lat, a.lng, b.lat, b.lng)));
       routes.push(await buildTomTomRouteFromOrder(depot, vehicle, ordered, zona, travelMode));
       continue;
     }
@@ -520,9 +662,10 @@ async function optimizeGroupViaTomTom(depot, vehicle, stores, zona) {
     }
     // melhoria 2-opt usando a matriz de distância REAL (não linha reta) — desfaz cruzamentos
     orderIdx = twoOptByMatrix(orderIdx, cost);
-    const ordered = orderIdx.map(i => bin[i - 1]);
+    let ordered = orderIdx.map(i => bin[i - 1]);
     // qualquer loja que não entrou (célula com erro) vai no fim, pela ordem original
     bin.forEach(s => { if (!ordered.includes(s)) ordered.push(s); });
+    ordered = enforceWindowOrder(ordered);
 
     routes.push(await buildTomTomRouteFromOrder(depot, vehicle, ordered, zona, travelMode));
   }
@@ -626,7 +769,8 @@ function nearestNeighborHaversine(depot, stores) {
   return ordered;
 }
 
-function binPackByCapacity(depot, vehicle, stores) {
+function binPackByCapacity(depot, vehicle, stores, zona) {
+  const maxStops = maxStopsForZone(zona);
   const withAngle = stores.map(s => ({ s, angle: Math.atan2(s.lat - depot.lat, s.lng - depot.long) }));
   withAngle.sort((a, b) => a.angle - b.angle);
   const bins = [];
@@ -636,7 +780,7 @@ function binPackByCapacity(depot, vehicle, stores) {
     const wouldExceed =
       cur.m3 + s.m3 > vehicle.m3 ||
       cur.kg + s.peso > vehicle.kg ||
-      current.length >= (state.config.maxStopsPerRoute || 10) ||
+      current.length >= maxStops ||
       (state.hasPalletData && (
         cur.con + (s.palletCongelado || 0) > vehicle.palletCongelado ||
         cur.res + (s.palletResfriado || 0) > vehicle.palletResfriado ||
@@ -655,7 +799,7 @@ function binPackByCapacity(depot, vehicle, stores) {
 
 /* ---- Caminho 3: fallback local (varredura polar + bin packing por haversine) ---- */
 function clusterGroupLocally(depot, vehicle, stores, zona) {
-  const bins = binPackByCapacity(depot, vehicle, stores);
+  const bins = binPackByCapacity(depot, vehicle, stores, zona);
   return bins.map(bin => buildRouteLocal(depot, vehicle, bin, zona));
 }
 
@@ -673,7 +817,7 @@ function buildRouteLocal(depot, vehicle, stores, zona) {
     ordered.push(chosen);
     cur = { lat: chosen.lat, lng: chosen.lng };
   }
-  const improved = twoOptStops(depot, ordered, (a, b) => haversineKm(a.lat, a.lng, b.lat, b.lng));
+  const improved = enforceWindowOrder(twoOptStops(depot, ordered, (a, b) => haversineKm(a.lat, a.lng, b.lat, b.lng)));
   return { depot, vehicle, zona, stores: improved, engine: "local", geometry: null, stepData: [] };
 }
 
@@ -713,6 +857,7 @@ function computeUsage() {
     r.palletSeco = r.stores.reduce((a, s) => a + (s.palletSeco || 0), 0);
     r.palletTotal = r.stores.reduce((a, s) => a + (s.palletTotal || 0), 0);
     state.colorByRoute[r.id] = colorForIndex(i);
+    validateRouteWindows(r);
   });
 }
 
@@ -1081,115 +1226,11 @@ function renderRouteList() {
 
   list.innerHTML = "";
   state.routes.forEach(route => {
-    const color = state.colorByRoute[route.id];
-    const overM3 = route.m3 > route.vehicle.m3;
-    const overKg = route.kg > route.vehicle.kg;
-    const matches = !q || route.code.toLowerCase().includes(q) ||
+    const matches = !q || (route.code || "").toLowerCase().includes(q) ||
       route.stores.some(s => s.codigo.toLowerCase().includes(q));
     if (!matches) return;
 
-    const card = document.createElement("div");
-    card.className = "route-card" + (route.id === state.selectedRouteId ? " open selected" : "") +
-      (route.engine === "unassigned" ? " route-danger" : "");
-    card.dataset.routeId = route.id;
-
-    const engineLabels = {
-      ors: ["ok", "rota real · ORS", "Distância e sequência calculadas pela malha viária real (OpenRouteService)"],
-      tomtom: ["ok", "rota real · TomTom", "Distância e sequência calculadas pela malha viária real, com trânsito (TomTom)"],
-      unassigned: ["danger", "sem rota", "Não coube em nenhum veículo — mova manualmente"],
-      local: ["warn", "estimado", "APIs indisponíveis — estimativa por linha reta"],
-    };
-    const [badgeClass, badgeText, badgeTitle] = engineLabels[route.engine] || engineLabels.local;
-    const engineBadge = `<span class="route-engine ${badgeClass}" title="${badgeTitle}">${badgeText}</span>`;
-
-    card.innerHTML = `
-      <div class="route-head">
-        <div class="route-swatch" style="background:${color}"></div>
-        <div>
-          <div class="route-code">${route.code}</div>
-          <div class="route-depot">${route.depot.sigla} · ${route.stores.length} paradas ${engineBadge}</div>
-        </div>
-        <div class="spacer"></div>
-        <button class="route-truck-icon-btn truck-view-btn" data-route-id="${route.id}" title="Ver caminhão desta rota">+</button>
-        <select class="route-vehicle" title="Trocar o veículo desta rota">
-          ${state.config.vehicles.map(v => `<option value="${v.codigo}" ${v.codigo === route.vehicle.codigo ? "selected" : ""}>${v.codigo}</option>`).join("")}
-        </select>
-      </div>
-      <div class="route-gauges">
-        <div class="gauge">
-          <div class="gauge-label"><span>M³</span><span>${fmtNum(route.m3)}/${fmtNum(route.vehicle.m3)}</span></div>
-          <div class="gauge-bar"><div class="gauge-fill ${overM3 ? "over" : (route.m3 / route.vehicle.m3 > 0.85 ? "warn" : "")}" style="width:${Math.min(100, route.m3 / route.vehicle.m3 * 100)}%"></div></div>
-        </div>
-        <div class="gauge">
-          <div class="gauge-label"><span>KG</span><span>${fmtNum(route.kg, 0)}/${fmtNum(route.vehicle.kg, 0)}</span></div>
-          <div class="gauge-bar"><div class="gauge-fill ${overKg ? "over" : (route.kg / route.vehicle.kg > 0.85 ? "warn" : "")}" style="width:${Math.min(100, route.kg / route.vehicle.kg * 100)}%"></div></div>
-        </div>
-      </div>
-      ${state.hasPalletData ? palletGaugesHtml(route) : ""}
-      <div class="route-stops"></div>
-    `;
-
-    const stopsWrap = card.querySelector(".route-stops");
-    route.stores.forEach((s, i) => {
-      const row = document.createElement("div");
-      row.className = "stop-row";
-      row.draggable = true;
-      row.dataset.storeId = s.id;
-      row.dataset.fromRoute = route.id;
-      const otherRoutes = state.routes.filter(r => r.id !== route.id);
-      const options = otherRoutes.map(r => `<option value="${r.id}">${r.code} (${r.stores.length} paradas)</option>`).join("");
-      row.innerHTML = `
-        <span class="stop-idx">${i + 1}</span>
-        <span class="stop-name">${s.codigo}</span>
-        <span class="stop-metric">${fmtNum(s.m3)} m³ · ${fmtNum(s.peso, 0)} kg</span>
-        <select class="stop-move-select" title="Mover esta loja para outra rota">
-          <option value="">Mover p/...</option>
-          ${options}
-        </select>
-      `;
-      row.addEventListener("dragstart", onStopDragStart);
-      row.addEventListener("dragend", onStopDragEnd);
-      row.querySelector(".stop-move-select").addEventListener("click", (e) => e.stopPropagation());
-      row.querySelector(".stop-move-select").addEventListener("change", (e) => {
-        const targetId = e.target.value;
-        if (!targetId) return;
-        moveStoreToRoute(s.id, route.id, targetId);
-      });
-      stopsWrap.appendChild(row);
-    });
-
-    card.querySelector(".route-head").addEventListener("click", () => {
-      const wasSelected = state.selectedRouteId === route.id;
-      state.selectedRouteId = wasSelected ? null : route.id;
-      renderRouteList();
-      if (wasSelected) renderMap(); else focusRouteOnMap(route.id);
-    });
-
-    const vehicleSelect = card.querySelector(".route-vehicle");
-    vehicleSelect.addEventListener("click", (e) => e.stopPropagation());
-    vehicleSelect.addEventListener("change", (e) => {
-      e.stopPropagation();
-      const novoVeiculo = state.config.vehicles.find(v => v.codigo === e.target.value);
-      if (!novoVeiculo) return;
-      route.vehicle = novoVeiculo;
-      renderAll();
-      toast(`${route.code} agora usa ${novoVeiculo.codigo}. Confira a capacidade.`);
-    });
-
-    const truckBtn = card.querySelector(".truck-view-btn");
-    if (truckBtn) truckBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      if (!state.hasPalletData) {
-        toast("Importe o \"Detalhe do pedido\" (botão no topo) pra ver a carga do caminhão por posição de palete.", "");
-        return;
-      }
-      openTruckModal(route);
-    });
-
-    card.addEventListener("dragover", (e) => { e.preventDefault(); card.classList.add("drag-over"); });
-    card.addEventListener("dragleave", () => card.classList.remove("drag-over"));
-    card.addEventListener("drop", (e) => onStopDrop(e, route.id));
-
+    const card = buildRouteCardEl(route);
     list.appendChild(card);
 
     if (route.id === state.selectedRouteId) {
@@ -1197,6 +1238,168 @@ function renderRouteList() {
       if (typeof requestAnimationFrame === "function") requestAnimationFrame(scrollFn); else scrollFn();
     }
   });
+}
+
+// Construção do card de rota isolada num função própria porque é usada em três lugares com os
+// MESMOS dados (mesma referência de `route`, só o elemento DOM é outro): a lista lateral, e as
+// duas colunas espelhadas do modal "Trocar lojas entre rotas" — arrastar de uma coluna pra
+// outra funciona porque as duas leem/escrevem o mesmo `state.routes`, só a exibição é duplicada.
+function buildRouteCardEl(route) {
+  const color = state.colorByRoute[route.id];
+  const overM3 = route.m3 > route.vehicle.m3;
+  const overKg = route.kg > route.vehicle.kg;
+
+  const card = document.createElement("div");
+  card.className = "route-card" + (route.id === state.selectedRouteId ? " open selected" : "") +
+    (route.engine === "unassigned" ? " route-danger" : "");
+  card.dataset.routeId = route.id;
+
+  const engineLabels = {
+    ors: ["ok", "rota real · ORS", "Distância e sequência calculadas pela malha viária real (OpenRouteService)"],
+    tomtom: ["ok", "rota real · TomTom", "Distância e sequência calculadas pela malha viária real, com trânsito (TomTom)"],
+    unassigned: ["danger", "sem rota", "Não coube em nenhum veículo — mova manualmente"],
+    local: ["warn", "estimado", "APIs indisponíveis — estimativa por linha reta"],
+    manual: ["", "manual", "Rota criada manualmente — arraste lojas pra cá"],
+  };
+  const [badgeClass, badgeText, badgeTitle] = engineLabels[route.engine] || engineLabels.local;
+  const engineBadge = `<span class="route-engine ${badgeClass}" title="${badgeTitle}">${badgeText}</span>`;
+  const maxStops = maxStopsForZone(route.zona);
+  const stopCountBadge = `<span class="route-stop-count${route.stores.length > maxStops ? " over" : ""}" title="Limite de paradas configurado pra esta zona: ${maxStops}">${route.stores.length}/${maxStops}</span>`;
+  const horarioWarnBadge = route._horarioViolado
+    ? `<span class="route-engine danger" title="Uma ou mais lojas desta rota têm horário obrigatório (🕐) que a sequência calculada não cumpre — confira loja por loja">⚠ horário</span>`
+    : "";
+
+  card.innerHTML = `
+    <div class="route-head">
+      <div class="route-swatch" style="background:${color}"></div>
+      <div>
+        <div class="route-code" title="Clique pra renomear">${route.code || `<span class="route-code-placeholder">Nomear rota…</span>`}</div>
+        <div class="route-depot">${route.depot.sigla} · ${stopCountBadge} paradas ${engineBadge}${horarioWarnBadge}</div>
+      </div>
+      <div class="spacer"></div>
+      <button class="route-truck-icon-btn truck-view-btn" data-route-id="${route.id}" title="Ver caminhão desta rota">+</button>
+      <select class="route-vehicle" title="Trocar o veículo desta rota">
+        ${state.config.vehicles.map(v => `<option value="${v.codigo}" ${v.codigo === route.vehicle.codigo ? "selected" : ""}>${v.codigo}</option>`).join("")}
+      </select>
+    </div>
+    <div class="route-gauges">
+      <div class="gauge">
+        <div class="gauge-label"><span>M³</span><span>${fmtNum(route.m3)}/${fmtNum(route.vehicle.m3)}</span></div>
+        <div class="gauge-bar"><div class="gauge-fill ${overM3 ? "over" : (route.m3 / route.vehicle.m3 > 0.85 ? "warn" : "")}" style="width:${Math.min(100, route.m3 / route.vehicle.m3 * 100)}%"></div></div>
+      </div>
+      <div class="gauge">
+        <div class="gauge-label"><span>KG</span><span>${fmtNum(route.kg, 0)}/${fmtNum(route.vehicle.kg, 0)}</span></div>
+        <div class="gauge-bar"><div class="gauge-fill ${overKg ? "over" : (route.kg / route.vehicle.kg > 0.85 ? "warn" : "")}" style="width:${Math.min(100, route.kg / route.vehicle.kg * 100)}%"></div></div>
+      </div>
+    </div>
+    ${state.hasPalletData ? palletGaugesHtml(route) : ""}
+    <div class="route-stops"></div>
+  `;
+
+  const stopsWrap = card.querySelector(".route-stops");
+  route.stores.forEach((s, i) => stopsWrap.appendChild(buildStopRowEl(s, i, route)));
+
+  card.querySelector(".route-head").addEventListener("click", () => selectRoute(route.id));
+
+  attachRouteCodeEditor(card.querySelector(".route-code"), route);
+
+  const vehicleSelect = card.querySelector(".route-vehicle");
+  vehicleSelect.addEventListener("click", (e) => e.stopPropagation());
+  vehicleSelect.addEventListener("change", (e) => {
+    e.stopPropagation();
+    const novoVeiculo = state.config.vehicles.find(v => v.codigo === e.target.value);
+    if (!novoVeiculo) return;
+    route.vehicle = novoVeiculo;
+    renderAll();
+    toast(`${route.code || "Rota"} agora usa ${novoVeiculo.codigo}. Confira a capacidade.`);
+  });
+
+  const truckBtn = card.querySelector(".truck-view-btn");
+  if (truckBtn) truckBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (!state.hasPalletData) {
+      toast("Importe o \"Detalhe do pedido\" (botão no topo) pra ver a carga do caminhão por posição de palete.", "");
+      return;
+    }
+    openTruckModal(route);
+  });
+
+  card.addEventListener("dragover", (e) => { e.preventDefault(); card.classList.add("drag-over"); });
+  card.addEventListener("dragleave", () => card.classList.remove("drag-over"));
+  card.addEventListener("drop", (e) => onStopDrop(e, route.id));
+
+  return card;
+}
+
+function selectRoute(routeId) {
+  const wasSelected = state.selectedRouteId === routeId;
+  state.selectedRouteId = wasSelected ? null : routeId;
+  renderRouteList();
+  if (isSwapModalOpen()) renderSwapModal();
+  if (wasSelected) renderMap(); else focusRouteOnMap(routeId);
+}
+
+// Clicar no nome da rota vira um campo de texto editável — usado tanto pra renomear rotas
+// normais quanto pra dar nome às rotas em branco (nova rota manual / encaixe que precisou virar
+// rota própria porque não coube em nenhuma loja/rota existente).
+function attachRouteCodeEditor(codeEl, route) {
+  codeEl.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const input = document.createElement("input");
+    input.className = "route-code-input";
+    input.value = route.code || "";
+    input.placeholder = "Nome da rota";
+    codeEl.replaceWith(input);
+    input.focus(); input.select();
+    let done = false;
+    const commit = () => { if (done) return; done = true; route.code = input.value.trim(); renderAll(); };
+    input.addEventListener("keydown", (ev) => {
+      if (ev.key === "Enter") input.blur();
+      else if (ev.key === "Escape") { done = true; renderAll(); }
+    });
+    input.addEventListener("blur", commit);
+    input.addEventListener("click", (ev) => ev.stopPropagation());
+  });
+}
+
+// Uma linha de loja — usada na lista de rotas, nas duas colunas do modal "Trocar lojas" e no
+// painel de "Encaixes (SA)" (nesse último, `route` vem null: a loja ainda não pertence a
+// nenhuma rota, só pode ser arrastada PARA uma).
+function buildStopRowEl(s, i, route) {
+  const row = document.createElement("div");
+  row.className = "stop-row";
+  row.draggable = true;
+  row.dataset.storeId = s.id;
+  row.dataset.fromRoute = route ? route.id : "SA";
+
+  const h = effectiveHorario(s);
+  const hClass = h ? (h.type === "exact" ? "exact" : h.type === "from" ? "from" : "") : "";
+  const violado = s._horarioViolado ? " violado" : "";
+
+  row.innerHTML = `
+    <span class="stop-idx">${i + 1}</span>
+    <span class="stop-name">${s.codigo}</span>
+    <span class="stop-metric">${fmtNum(s.m3)} m³ · ${fmtNum(s.peso, 0)} kg</span>
+    ${state.hasPalletData ? `<button class="stop-cam-btn" type="button" title="Ver/mover carga por câmara (congelado/resfriado/seco)">📦 ${s.palletTotal || 0}</button>` : ""}
+    <button class="horario-badge ${hClass}${violado}" type="button">${horarioBadgeText(h)}</button>
+  `;
+  row.querySelector(".horario-badge").title = horarioLabel(h);
+
+  row.addEventListener("dragstart", onStopDragStart);
+  row.addEventListener("dragend", onStopDragEnd);
+
+  row.querySelector(".horario-badge").addEventListener("click", (e) => {
+    e.stopPropagation();
+    openHorarioPopover(e.currentTarget, s);
+  });
+
+  const camBtn = row.querySelector(".stop-cam-btn");
+  if (camBtn) camBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    toggleStopCamDetail(row, s, route);
+  });
+
+  return row;
 }
 
 let dragPayload = null;
@@ -1213,24 +1416,208 @@ function onStopDrop(e, targetRouteId) {
   moveStoreToRoute(dragPayload.storeId, dragPayload.fromRoute, targetRouteId);
 }
 
-function moveStoreToRoute(storeId, fromRouteId, targetRouteId) {
-  const fromRoute = state.routes.find(r => r.id === fromRouteId);
-  const toRoute = state.routes.find(r => r.id === targetRouteId);
-  if (!fromRoute || !toRoute) return;
+// `fromId` pode ser o id de uma rota OU o sentinel "SA" (loja ainda no painel de encaixes).
+function findStoreContainer(fromId) {
+  if (fromId === "SA") return { list: state.saStores, route: null };
+  const route = state.routes.find(r => r.id === fromId);
+  return route ? { list: route.stores, route } : null;
+}
 
-  const idx = fromRoute.stores.findIndex(s => s.id === storeId);
+function moveStoreToRoute(storeId, fromId, targetRouteId) {
+  const from = findStoreContainer(fromId);
+  const toRoute = state.routes.find(r => r.id === targetRouteId);
+  if (!from || !toRoute) return;
+
+  const idx = from.list.findIndex(s => s.id === storeId);
   if (idx === -1) return;
-  const [store] = fromRoute.stores.splice(idx, 1);
+  const [store] = from.list.splice(idx, 1);
   toRoute.stores.push(store);
 
   // edição manual invalida os dados de tempo/geometria vindos do otimizador — volta pra estimativa
-  [fromRoute, toRoute].forEach(r => {
+  [from.route, toRoute].forEach(r => {
+    if (r && (r.engine === "ors" || r.engine === "tomtom")) { r.engine = "local"; r.geometry = null; r.stepData = []; }
+  });
+
+  computeUsage();
+  renderAll();
+  toast(`${store.codigo} movida para ${toRoute.code || "rota sem nome"}. Confira a capacidade.`);
+}
+
+/* ---------------- Encaixes (SA) ---------------- */
+function updateSaPanel() {
+  const panel = document.getElementById("saPanel");
+  const listEl = document.getElementById("saList");
+  const countEl = document.getElementById("saCount");
+  if (!panel || !listEl || !countEl) return;
+  const stores = state.saStores || [];
+  countEl.textContent = String(stores.length);
+  panel.style.display = stores.length ? "block" : "none";
+  listEl.innerHTML = "";
+  stores.forEach((s, i) => listEl.appendChild(buildStopRowEl(s, i, null)));
+}
+
+/* ---------------- Modal "Trocar lojas entre rotas" ---------------- */
+function renderSwapModal() {
+  ["swapListA", "swapListB"].forEach(id => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.innerHTML = "";
+    state.routes.forEach(route => el.appendChild(buildRouteCardEl(route)));
+  });
+}
+
+/* ---------------- Janela de horário: edição inline (popover) ---------------- */
+let activeHorarioPopover = null;
+function closeHorarioPopover() {
+  if (activeHorarioPopover) { activeHorarioPopover.remove(); activeHorarioPopover = null; }
+}
+document.addEventListener("click", (e) => {
+  if (activeHorarioPopover && !activeHorarioPopover.contains(e.target)) closeHorarioPopover();
+});
+
+function openHorarioPopover(anchorEl, store) {
+  closeHorarioPopover();
+  const h = effectiveHorario(store) || { hour: 8, type: "free" };
+  const pop = document.createElement("div");
+  pop.className = "horario-pop";
+  pop.innerHTML = `
+    <div class="row"><label style="flex:1">Horário</label>
+      <select class="hp-hour">${Array.from({ length: 24 }, (_, i) =>
+        `<option value="${i}" ${i === h.hour ? "selected" : ""}>${String(i).padStart(2, "0")}:00</option>`).join("")}</select>
+    </div>
+    <div class="row"><label style="flex:1">Restrição</label>
+      <select class="hp-type">
+        <option value="free" ${h.type === "free" ? "selected" : ""}>Sem restrição (ref.)</option>
+        <option value="from" ${h.type === "from" ? "selected" : ""}>Obrigatório: a partir do horário</option>
+        <option value="exact" ${h.type === "exact" ? "selected" : ""}>Obrigatório: só naquele horário</option>
+      </select>
+    </div>
+    <div class="actions">
+      <button class="btn btn-sm btn-line" data-act="reset" type="button">Original</button>
+      <button class="btn btn-sm btn-primary" data-act="save" type="button">Salvar</button>
+    </div>
+  `;
+  document.body.appendChild(pop);
+  const rect = anchorEl.getBoundingClientRect();
+  pop.style.top = (rect.bottom + window.scrollY + 6) + "px";
+  pop.style.left = Math.max(6, Math.min(rect.left + window.scrollX, window.innerWidth - 210)) + "px";
+  activeHorarioPopover = pop;
+
+  pop.addEventListener("click", (e) => e.stopPropagation());
+  pop.querySelector('[data-act="save"]').addEventListener("click", () => {
+    store.horarioOverride = {
+      hour: parseInt(pop.querySelector(".hp-hour").value, 10),
+      type: pop.querySelector(".hp-type").value,
+    };
+    closeHorarioPopover();
+    computeUsage();
+    renderAll();
+    toast(`Horário de ${store.codigo} atualizado.`);
+  });
+  pop.querySelector('[data-act="reset"]').addEventListener("click", () => {
+    store.horarioOverride = null;
+    closeHorarioPopover();
+    computeUsage();
+    renderAll();
+  });
+}
+
+/* ---------------- Carga por câmara (congelado/resfriado/seco) por loja ---------------- */
+// Só existe quando o "Detalhe do pedido" foi importado (é dali que vem a posição de palete por
+// câmara, por loja). Permite mover só uma câmara pra outra rota — a mesma loja acaba com dois
+// (ou três) pontos de entrega, um por rota/veículo, pra caber num 3/4 que não aguenta o pedido
+// inteiro de uma vez. A divisão de m³/kg/caixas é proporcional à fração de paletes movida —
+// uma aproximação, já que o pedido principal não separa m³/kg por câmara linha a linha.
+function toggleStopCamDetail(row, store, route) {
+  const existing = row.nextElementSibling;
+  if (existing && existing.classList.contains("stop-cam-detail")) { existing.remove(); return; }
+  document.querySelectorAll(".stop-cam-detail").forEach(el => el.remove());
+  if (!route) { toast("Arraste esta loja pra uma rota primeiro pra poder dividir a carga por câmara.", ""); return; }
+
+  const detail = document.createElement("div");
+  detail.className = "stop-cam-detail";
+  detail.innerHTML = buildStopCamDetailHtml(store, route);
+  row.after(detail);
+
+  detail.querySelectorAll(".cam-row[data-cam]").forEach(camRow => {
+    const key = camRow.dataset.cam;
+    const btn = camRow.querySelector("button");
+    if (!btn) return;
+    btn.addEventListener("click", () => {
+      const qty = parseInt(camRow.querySelector("input").value, 10) || 0;
+      const targetRouteId = camRow.querySelector("select").value;
+      if (!targetRouteId || qty <= 0) { toast("Escolha a rota destino e uma quantidade válida.", "danger"); return; }
+      splitStoreCamera(store, route, key, qty, targetRouteId);
+    });
+  });
+}
+
+function buildStopCamDetailHtml(store, route) {
+  const cams = [["congelado", "CONGELADO"], ["resfriado", "RESFRIADO"], ["seco", "SECO"]];
+  const otherRoutes = state.routes.filter(r => r.id !== route.id);
+  const routeOptions = otherRoutes.map(r =>
+    `<option value="${r.id}">${r.code || "(sem nome)"} · ${r.stores.length} paradas</option>`).join("");
+  return cams.map(([key, label]) => {
+    const propKey = "pallet" + key[0].toUpperCase() + key.slice(1);
+    const qty = store[propKey] || 0;
+    if (!qty) return `<div class="cam-row"><span class="cam-label">${label}</span><span>0 posições</span></div>`;
+    return `
+      <div class="cam-row" data-cam="${key}">
+        <span class="cam-label">${label}</span>
+        <span>${qty} plt</span>
+        <input type="number" min="1" max="${qty}" value="${qty}" title="Quantas posições de palete mover" />
+        <select title="Rota destino"><option value="">Mover p/ rota...</option>${routeOptions}</select>
+        <button class="btn btn-sm btn-line" type="button">Mover</button>
+      </div>`;
+  }).join("");
+}
+
+function splitStoreCamera(store, route, camara, qty, targetRouteId) {
+  const targetRoute = state.routes.find(r => r.id === targetRouteId);
+  if (!targetRoute) return;
+  const key = "pallet" + camara[0].toUpperCase() + camara.slice(1);
+  const have = store[key] || 0;
+  qty = Math.min(qty, have);
+  if (qty <= 0) return;
+  // m³/kg/caixas não são separados por câmara no pedido principal — só a paletização total é.
+  // Por isso a fração movida tem que ser sobre o TOTAL de paletes da loja (não só os dessa
+  // câmara): mover 1 de 2 posições de congelado numa loja que tem 5 posições no total move 1/5
+  // do m³/kg, não 1/2 (senão o congelado "puxaria" proporcionalmente m³ que na really é de
+  // seco/resfriado, superestimando a carga movida).
+  const totalPal = store.palletTotal || (store.palletCongelado || 0) + (store.palletResfriado || 0) + (store.palletSeco || 0);
+  const shareOfStore = totalPal ? qty / totalPal : 0;
+
+  store[key] = have - qty;
+  store.palletTotal = Math.max(0, (store.palletTotal || 0) - qty);
+  const movedM3 = store.m3 * shareOfStore, movedKg = store.peso * shareOfStore, movedCx = store.caixas * shareOfStore;
+  store.m3 -= movedM3; store.peso -= movedKg; store.caixas -= movedCx;
+
+  // já existe uma parte dessa mesma loja na rota destino (de uma divisão anterior)? soma nela.
+  const parentId = store.isSplitOf || store.id;
+  let target = targetRoute.stores.find(s => (s.isSplitOf || s.id) === parentId && s !== store);
+  if (!target) {
+    target = { ...store, id: store.id + "_split_" + Date.now(), isSplitOf: parentId,
+      m3: 0, peso: 0, caixas: 0, palletCongelado: 0, palletResfriado: 0, palletSeco: 0, palletTotal: 0,
+      horarioOverride: store.horarioOverride, horario: store.horario };
+    targetRoute.stores.push(target);
+  }
+  target[key] = (target[key] || 0) + qty;
+  target.palletTotal = (target.palletTotal || 0) + qty;
+  target.m3 += movedM3; target.peso += movedKg; target.caixas += movedCx;
+
+  // se a loja de origem não ficou com carga nenhuma, remove o registro vazio dessa rota.
+  if ((store.palletTotal || 0) <= 0) {
+    const idx = route.stores.indexOf(store);
+    if (idx !== -1) route.stores.splice(idx, 1);
+  }
+
+  [route, targetRoute].forEach(r => {
     if (r.engine === "ors" || r.engine === "tomtom") { r.engine = "local"; r.geometry = null; r.stepData = []; }
   });
 
   computeUsage();
   renderAll();
-  toast(`${store.codigo} movida para ${toRoute.code}. Confira a capacidade.`);
+  toast(`${qty} posição(ões) de ${camara} de ${store.codigo} movida(s) para ${targetRoute.code || "rota sem nome"}.`);
 }
 
 /* ---------------- Map ---------------- */
@@ -1240,6 +1627,7 @@ function initMap() {
     `https://api.mapbox.com/styles/v1/mapbox/light-v11/tiles/{z}/{x}/{y}@2x?access_token=${MAPBOX_TOKEN}`,
     { attribution: "© Mapbox © OpenStreetMap", maxZoom: 19, tileSize: 512, zoomOffset: -1 }
   ).addTo(state.map);
+  state.map.on("movestart", () => { state.map._userMoved = true; });
 }
 
 function renderMap() {
@@ -1336,11 +1724,18 @@ function renderLegend() {
   `).join("") + (state.routes.length > 12 ? `<div class="legend-row" style="color:var(--ink-faint)">+ ${state.routes.length - 12} rotas...</div>` : "");
 }
 
+function isSwapModalOpen() {
+  const el = document.getElementById("swapModal");
+  return !!el && el.classList.contains("show");
+}
+
 function renderAll() {
   renderKpis();
   renderRouteList();
+  updateSaPanel();
   renderMap();
   renderLegend();
+  if (isSwapModalOpen()) renderSwapModal();
 }
 
 /* ---------------- Config tab rendering ---------------- */
@@ -1409,6 +1804,20 @@ function renderConfigTab() {
     tuv.appendChild(tr);
   });
 
+  const tms = document.querySelector("#tblZoneMaxStops tbody");
+  tms.innerHTML = "";
+  Object.keys(state.config.zoneDepot).sort().forEach(zona => {
+    const tr = document.createElement("tr");
+    const current = state.config.zoneMaxStops[zona] || "";
+    tr.innerHTML = `<td>${zona}</td><td><input type="number" min="1" placeholder="${state.config.maxStopsPerRoute || 10} (padrão)" value="${current}" /></td>`;
+    tr.querySelector("input").addEventListener("change", (e) => {
+      const v = parseInt(e.target.value, 10);
+      if (v > 0) state.config.zoneMaxStops[zona] = v; else delete state.config.zoneMaxStops[zona];
+      saveConfig(); runClustering();
+    });
+    tms.appendChild(tr);
+  });
+
   const chips = document.getElementById("zoneTruckChips");
   chips.innerHTML = "";
   Object.keys(state.config.zoneDepot).sort().forEach(zona => {
@@ -1439,13 +1848,14 @@ function renderConfigTab() {
     tzo.appendChild(tr);
   });
 
-  ["cfgLoadMin", "cfgPrepMin", "cfgSpeed", "cfgRoadFactor", "cfgStopMin", "cfgMaxStops"].forEach(id => {
+  ["cfgLoadMin", "cfgPrepMin", "cfgSpeed", "cfgRoadFactor", "cfgStopMin", "cfgMaxStops", "cfgWindowTolerance"].forEach(id => {
     const el = document.getElementById(id);
-    const map = { cfgLoadMin: "loadMin", cfgPrepMin: "prepMin", cfgSpeed: "speedKmh", cfgRoadFactor: "roadFactor", cfgStopMin: "stopMin", cfgMaxStops: "maxStopsPerRoute" };
+    const map = { cfgLoadMin: "loadMin", cfgPrepMin: "prepMin", cfgSpeed: "speedKmh", cfgRoadFactor: "roadFactor", cfgStopMin: "stopMin", cfgMaxStops: "maxStopsPerRoute", cfgWindowTolerance: "windowToleranceMin" };
     el.value = state.config[map[id]];
     el.addEventListener("change", () => {
       state.config[map[id]] = parseFloat(el.value); saveConfig();
       if (id === "cfgMaxStops") runClustering();
+      if (id === "cfgWindowTolerance") { computeUsage(); renderAll(); }
     });
   });
 }
@@ -1507,6 +1917,23 @@ function fmtMinAsHHMM(min) {
 
 function exportCsv() {
   if (!state.routes.length) return;
+
+  const semNome = state.routes.filter(r => r.stores.length && !(r.code || "").trim());
+  if (semNome.length) {
+    toast(`Renomeie antes de exportar: rota(s) sem nome com carga (clique no nome da rota na lista).`, "danger");
+    return;
+  }
+
+  // Uma loja dividida por câmara (mesmo pedido em duas rotas) ainda usa as MESMAS linhas do
+  // pedido original nos dois pedaços — sem separação linha a linha por câmara (isso só existe
+  // no arquivo de "Detalhe do pedido"), gerar o CSV agora duplicaria pedido no arquivo devolvido
+  // ao JDE. Trava a exportação até isso ser resolvido, em vez de mandar um arquivo errado.
+  const temDivisaoPorCamara = state.routes.some(r => r.stores.some(s => s.isSplitOf));
+  if (temDivisaoPorCamara) {
+    toast("Há loja(s) com carga dividida por câmara entre rotas — ainda não dá pra gerar o CSV certo nesse caso (falta separar as linhas do pedido por câmara). Volte a dividir e mova a loja inteira, ou aguarde a próxima atualização.", "danger");
+    return;
+  }
+
   const header = [
     "CALL.ID", "CALL.NAME", "CALL.DEPOTID", "CALL.ORDDETS3", "CALL.TDATA01", "CALL.TDATA05",
     "FN_JOHN_WB_MBBRAZILLOADINGSTART", "FN_JOHN_WB_MBBRAZILSHIFTSTART", "FN_JOHN_WB_MBBRAZILDEPOTDEPART",
@@ -1547,13 +1974,41 @@ function exportCsv() {
 
 /* ---------------- Wiring ---------------- */
 function wireEvents() {
-  document.querySelectorAll(".tab").forEach(tab => {
-    tab.addEventListener("click", () => {
-      document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
-      tab.classList.add("active");
-      document.getElementById("panel-rotas").classList.toggle("hidden", tab.dataset.tab !== "rotas");
-      document.getElementById("panel-config").classList.toggle("hidden", tab.dataset.tab !== "config");
+  document.getElementById("btnConfig").addEventListener("click", () => {
+    renderConfigTab();
+    document.getElementById("configModal").classList.add("show");
+  });
+  document.getElementById("configModalClose").addEventListener("click", () => {
+    document.getElementById("configModal").classList.remove("show");
+  });
+  document.getElementById("configModal").addEventListener("click", (e) => {
+    if (e.target.id === "configModal") document.getElementById("configModal").classList.remove("show");
+  });
+
+  document.getElementById("btnGerenciarRotas").addEventListener("click", () => {
+    if (!state.routes.length) { toast("Importe um pedido e gere as rotas primeiro.", ""); return; }
+    renderSwapModal();
+    document.getElementById("swapModal").classList.add("show");
+  });
+  document.getElementById("swapModalClose").addEventListener("click", () => {
+    document.getElementById("swapModal").classList.remove("show");
+  });
+  document.getElementById("swapModal").addEventListener("click", (e) => {
+    if (e.target.id === "swapModal") document.getElementById("swapModal").classList.remove("show");
+  });
+
+  document.getElementById("btnNovaRota").addEventListener("click", () => {
+    if (!state.stores.length) { toast("Importe um pedido primeiro.", ""); return; }
+    const depot = state.config.depots[0];
+    const vehicle = state.config.vehicles.find(v => v.codigo === "3/4") || state.config.vehicles[0];
+    if (!depot || !vehicle) { toast("Cadastre ao menos um depósito e um veículo em Configurações.", "danger"); return; }
+    state.routes.push({
+      id: "r_manual_" + Date.now(), code: "", seq: null,
+      depot, vehicle, zona: "", stores: [], engine: "manual", geometry: null, stepData: [],
     });
+    computeUsage();
+    renderAll();
+    toast("Rota em branco criada — arraste lojas pra ela e clique no nome pra renomear.", "success");
   });
 
   const fileInput = document.getElementById("fileInput");
@@ -1580,15 +2035,20 @@ function wireEvents() {
   document.getElementById("truckModal").addEventListener("click", (e) => {
     if (e.target.id === "truckModal") closeTruckModal();
   });
-
-  document.querySelectorAll(".route-stops").forEach; // noop, cards built dynamically
-  state.map && state.map.on("movestart", () => { state.map._userMoved = true; });
 }
 
 /* ---------------- Init ---------------- */
+// wireEvents() e renderConfigTab() vêm ANTES do mapa de propósito: se o Leaflet ou os tiles do
+// Mapbox falharem (CDN fora do ar, sem internet, bloqueio de rede corporativo), o resto do
+// sistema — importar pedido, configurações, exportar — continua funcionando normalmente, só o
+// mapa em si fica indisponível.
 document.addEventListener("DOMContentLoaded", () => {
-  initMap();
-  state.map.on("movestart", () => { state.map._userMoved = true; });
   renderConfigTab();
   wireEvents();
+  try {
+    initMap();
+  } catch (err) {
+    console.error("Falha ao iniciar o mapa:", err);
+    toast("Não foi possível carregar o mapa (sem conexão ou CDN bloqueado) — o resto do sistema continua funcionando normalmente.", "danger");
+  }
 });
