@@ -90,10 +90,16 @@ menor. Clique no nome de qualquer rota pra renomeá-la.
 Com o "Detalhe do pedido" importado, cada loja na lista de rotas mostra um botão 📦 com o total
 de posições de palete. Clicar nele abre a quebra por câmara (congelado/resfriado/seco) e permite
 mover só uma parte pra outra rota — útil quando o veículo é limitado (ex.: só cabe 3/4 num local)
-e a loja não cabe inteira num só caminhão: uma parte segue numa rota, o resto noutra. O m³/kg/caixas
-movido é uma aproximação proporcional à fração de paletes (o pedido principal não separa m³/kg
-por câmara linha a linha). Por segurança, o CSV de exportação fica bloqueado enquanto existir
-uma divisão desse tipo pendente — mova a loja inteira (não dividida) antes de exportar.
+e a loja não cabe inteira num só caminhão: uma parte segue numa rota, o resto noutra.
+
+- **Mover a câmara inteira** (a quantidade cheia que aparece por padrão): o pedido principal já
+  vem com uma linha por câmara (`CALL.TDATA05` = Congelados/Resfriados/Secos), então o sistema
+  move as linhas de pedido de verdade pro destino — m³/kg/caixas exatos, sem duplicar nem perder
+  nada no export. Pode exportar normalmente depois.
+- **Mover só uma fração** (ex.: 1 de 3 posições): não dá pra separar uma linha de pedido ao meio,
+  então o m³/kg/caixas movido é uma aproximação proporcional à fração de paletes. Por segurança,
+  o CSV de exportação fica bloqueado enquanto existir uma divisão parcial pendente — mova a
+  câmara inteira (ou a loja inteira) antes de exportar.
 
 ## Arquivos
 

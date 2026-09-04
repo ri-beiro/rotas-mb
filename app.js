@@ -267,13 +267,24 @@ function importRows(rows, fileName) {
         horario: parseHorarioJde(r["CALL.ORDDETS1"]),
         horarioOverride: null,
         rows: [],
+        porCamara: {}, // congelado/resfriado/seco -> {peso, m3, caixas, rows} — ver camaraKeyFromRow()
       });
     }
     const s = byStore.get(key);
-    s.peso += parseFloat(String(r["CALL.USER01"]).replace(",", ".")) || 0;
-    s.m3 += parseFloat(String(r["CALL.USER02"]).replace(",", ".")) || 0;
-    s.caixas += parseFloat(String(r["CALL.USER04"]).replace(",", ".")) || 0;
+    const peso = parseFloat(String(r["CALL.USER01"]).replace(",", ".")) || 0;
+    const m3 = parseFloat(String(r["CALL.USER02"]).replace(",", ".")) || 0;
+    const caixas = parseFloat(String(r["CALL.USER04"]).replace(",", ".")) || 0;
+    s.peso += peso; s.m3 += m3; s.caixas += caixas;
     s.rows.push(r);
+
+    const camKey = camaraKeyFromRow(r);
+    if (camKey) {
+      if (!s.porCamara[camKey]) s.porCamara[camKey] = { peso: 0, m3: 0, caixas: 0, rows: [] };
+      s.porCamara[camKey].peso += peso;
+      s.porCamara[camKey].m3 += m3;
+      s.porCamara[camKey].caixas += caixas;
+      s.porCamara[camKey].rows.push(r);
+    }
   }
 
   state.stores = Array.from(byStore.values());
@@ -935,6 +946,15 @@ function computeUsage() {
 /* ---------------- Rendering: KPIs ---------------- */
 /* ---------------- Diagrama de carregamento (Load Planning) ---------------- */
 const CAMARA_LABELS = { congelado: "CONGELADO", resfriado: "RESFRIADO", seco: "SECO" };
+// O pedido principal do JDE já vem com uma linha por câmara, marcada em CALL.TDATA05
+// ("Congelados"/"Resfriados"/"Secos") — confirmado comparando um pedido real roteirizado com o
+// mesmo pedido finalizado no Paragon. Isso dá m³/kg/caixas EXATOS por câmara (não só a
+// paletização por produto do "Detalhe do pedido", que é uma aproximação por SKU).
+const CAMARA_LABEL_TO_KEY = { congelados: "congelado", resfriados: "resfriado", secos: "seco" };
+function camaraKeyFromRow(r) {
+  const raw = String(r["CALL.TDATA05"] || "").trim().toLowerCase();
+  return CAMARA_LABEL_TO_KEY[raw] || null;
+}
 // ordem física frente→fundo (cabine → portas): congelado fica mais perto da unidade de
 // frio, seco fica mais perto das portas traseiras.
 const CAMARA_ORDER = ["congelado", "resfriado", "seco"];
@@ -1632,7 +1652,7 @@ function buildStopCamDetailHtml(store, route) {
   const otherRoutes = state.routes.filter(r => r.id !== route.id);
   const routeOptions = otherRoutes.map(r =>
     `<option value="${r.id}">${r.code || "(sem nome)"} · ${r.stores.length} paradas</option>`).join("");
-  return cams.map(([key, label]) => {
+  const rows = cams.map(([key, label]) => {
     const propKey = "pallet" + key[0].toUpperCase() + key.slice(1);
     const qty = store[propKey] || 0;
     if (!qty) return `<div class="cam-row"><span class="cam-label">${label}</span><span>0 posições</span></div>`;
@@ -1645,6 +1665,7 @@ function buildStopCamDetailHtml(store, route) {
         <button class="btn btn-sm btn-line" type="button">Mover</button>
       </div>`;
   }).join("");
+  return rows + `<div class="hint" style="margin:4px 0 0">Mover a câmara inteira (quantidade cheia) separa certinho, linha a linha do pedido. Mover só uma parte é uma aproximação de m³/kg e trava a exportação até resolver.</div>`;
 }
 
 function splitStoreCamera(store, route, camara, qty, targetRouteId) {
@@ -1654,18 +1675,6 @@ function splitStoreCamera(store, route, camara, qty, targetRouteId) {
   const have = store[key] || 0;
   qty = Math.min(qty, have);
   if (qty <= 0) return;
-  // m³/kg/caixas não são separados por câmara no pedido principal — só a paletização total é.
-  // Por isso a fração movida tem que ser sobre o TOTAL de paletes da loja (não só os dessa
-  // câmara): mover 1 de 2 posições de congelado numa loja que tem 5 posições no total move 1/5
-  // do m³/kg, não 1/2 (senão o congelado "puxaria" proporcionalmente m³ que na really é de
-  // seco/resfriado, superestimando a carga movida).
-  const totalPal = store.palletTotal || (store.palletCongelado || 0) + (store.palletResfriado || 0) + (store.palletSeco || 0);
-  const shareOfStore = totalPal ? qty / totalPal : 0;
-
-  store[key] = have - qty;
-  store.palletTotal = Math.max(0, (store.palletTotal || 0) - qty);
-  const movedM3 = store.m3 * shareOfStore, movedKg = store.peso * shareOfStore, movedCx = store.caixas * shareOfStore;
-  store.m3 -= movedM3; store.peso -= movedKg; store.caixas -= movedCx;
 
   // já existe uma parte dessa mesma loja na rota destino (de uma divisão anterior)? soma nela.
   const parentId = store.isSplitOf || store.id;
@@ -1673,9 +1682,43 @@ function splitStoreCamera(store, route, camara, qty, targetRouteId) {
   if (!target) {
     target = { ...store, id: store.id + "_split_" + Date.now(), isSplitOf: parentId,
       m3: 0, peso: 0, caixas: 0, palletCongelado: 0, palletResfriado: 0, palletSeco: 0, palletTotal: 0,
-      horarioOverride: store.horarioOverride, horario: store.horario };
+      horarioOverride: store.horarioOverride, horario: store.horario,
+      rows: [], porCamara: {}, isSplitExact: true };
     targetRoute.stores.push(target);
   }
+
+  // Movendo a câmara INTEIRA (qty === have) e com a marcação por linha do pedido principal
+  // (CALL.TDATA05, ver camaraKeyFromRow) disponível: dá pra mover as linhas de pedido de verdade
+  // pro destino, com m³/kg/caixas exatos — sem duplicar nem perder nada no export. Movimento
+  // PARCIAL (sobra câmara na loja de origem) não tem como mover linha por linha — cai na
+  // aproximação proporcional de sempre, e fica marcado pra travar o export até resolver.
+  const exact = qty === have && store.porCamara && store.porCamara[camara];
+  let movedM3, movedKg, movedCx;
+
+  if (exact) {
+    const cam = store.porCamara[camara];
+    movedM3 = cam.m3; movedKg = cam.peso; movedCx = cam.caixas;
+    cam.rows.forEach(r => {
+      const idx = store.rows.indexOf(r);
+      if (idx !== -1) store.rows.splice(idx, 1);
+    });
+    target.rows.push(...cam.rows);
+    target.porCamara[camara] = cam;
+    delete store.porCamara[camara];
+  } else {
+    // m³/kg/caixas não são separados por câmara nesse caso — a fração movida é sobre o TOTAL de
+    // paletes da loja (não só os dessa câmara): mover 1 de 2 posições de congelado numa loja que
+    // tem 5 posições no total move 1/5 do m³/kg, não 1/2 (senão puxaria proporcionalmente m³ que
+    // na real é de seco/resfriado, superestimando a carga movida).
+    const totalPal = store.palletTotal || (store.palletCongelado || 0) + (store.palletResfriado || 0) + (store.palletSeco || 0);
+    const shareOfStore = totalPal ? qty / totalPal : 0;
+    movedM3 = store.m3 * shareOfStore; movedKg = store.peso * shareOfStore; movedCx = store.caixas * shareOfStore;
+    target.isSplitExact = false;
+  }
+
+  store[key] = have - qty;
+  store.palletTotal = Math.max(0, (store.palletTotal || 0) - qty);
+  store.m3 -= movedM3; store.peso -= movedKg; store.caixas -= movedCx;
   target[key] = (target[key] || 0) + qty;
   target.palletTotal = (target.palletTotal || 0) + qty;
   target.m3 += movedM3; target.peso += movedKg; target.caixas += movedCx;
@@ -1692,7 +1735,8 @@ function splitStoreCamera(store, route, camara, qty, targetRouteId) {
 
   computeUsage();
   renderAll();
-  toast(`${qty} posição(ões) de ${camara} de ${store.codigo} movida(s) para ${targetRoute.code || "rota sem nome"}.`);
+  const obs = exact ? "" : " (divisão parcial — m³/kg é uma aproximação, exportação bloqueada até resolver)";
+  toast(`${qty} posição(ões) de ${camara} de ${store.codigo} movida(s) para ${targetRoute.code || "rota sem nome"}.${obs}`);
 }
 
 /* ---------------- Map ---------------- */
@@ -1997,13 +2041,13 @@ function exportCsv() {
     return;
   }
 
-  // Uma loja dividida por câmara (mesmo pedido em duas rotas) ainda usa as MESMAS linhas do
-  // pedido original nos dois pedaços — sem separação linha a linha por câmara (isso só existe
-  // no arquivo de "Detalhe do pedido"), gerar o CSV agora duplicaria pedido no arquivo devolvido
-  // ao JDE. Trava a exportação até isso ser resolvido, em vez de mandar um arquivo errado.
-  const temDivisaoPorCamara = state.routes.some(r => r.stores.some(s => s.isSplitOf));
-  if (temDivisaoPorCamara) {
-    toast("Há loja(s) com carga dividida por câmara entre rotas — ainda não dá pra gerar o CSV certo nesse caso (falta separar as linhas do pedido por câmara). Volte a dividir e mova a loja inteira, ou aguarde a próxima atualização.", "danger");
+  // Divisão por câmara: quando foi a câmara INTEIRA que mudou de rota (isSplitExact), as linhas
+  // reais do pedido já foram movidas junto (ver splitStoreCamera) — export sai certo. Quando foi
+  // uma divisão PARCIAL (sobrou câmara na loja de origem), não tem como separar linha a linha
+  // sem duplicar/perder pedido no CSV — trava só nesse caso.
+  const temDivisaoAproximada = state.routes.some(r => r.stores.some(s => s.isSplitOf && s.isSplitExact === false));
+  if (temDivisaoAproximada) {
+    toast("Há loja(s) com divisão PARCIAL de câmara entre rotas — ainda não dá pra gerar o CSV certo nesse caso. Mova a câmara inteira (não uma fração dela), ou aguarde a próxima atualização.", "danger");
     return;
   }
 
