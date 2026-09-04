@@ -38,18 +38,29 @@ function defaultConfig() {
     vehicles: DEFAULT_VEHICLES.map(v => ({ ...v })),
     zoneDepot: { ...DEFAULT_ZONE_DEPOT },
     zoneVehicle: { ...DEFAULT_ZONE_VEHICLE },
-    zoneAllowTruck: [...DEFAULT_ZONE_ALLOW_TRUCK],
     zoneOverrides: DEFAULT_ZONE_OVERRIDES.map(z => ({ ...z })),
     zoneMaxStops: { ...DEFAULT_ZONE_MAX_STOPS },
+    zoneTransportadora: { ...DEFAULT_ZONE_TRANSPORTADORA },
     loadMin: 60, prepMin: 60, speedKmh: 45, roadFactor: 1.3, stopMin: 20, maxStopsPerRoute: 10,
     windowToleranceMin: 10,
   };
 }
+// Dicionários chave→zona que merecem merge CAMPO-A-CAMPO (não só objeto inteiro): permite que
+// zonas novas adicionadas numa atualização (ex.: uma zona de viagem nova) apareçam pra quem já
+// tinha config salva, sem apagar as zonas que a pessoa já tinha personalizado manualmente.
+const ZONE_KEYED_CONFIG_FIELDS = ["zoneDepot", "zoneVehicle", "zoneMaxStops", "zoneTransportadora"];
+
 function loadConfig() {
   const defaults = defaultConfig();
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
-    if (saved && typeof saved === "object") return { ...defaults, ...saved };
+    if (saved && typeof saved === "object") {
+      const merged = { ...defaults, ...saved };
+      ZONE_KEYED_CONFIG_FIELDS.forEach(key => {
+        merged[key] = { ...defaults[key], ...(saved[key] || {}) };
+      });
+      return merged;
+    }
   } catch (e) {}
   return defaults;
 }
@@ -377,12 +388,28 @@ function resolveDepotForStore(store) {
 }
 
 function resolveVehicleForStore(store) {
-  if (state.config.zoneAllowTruck.includes(store.zona)) return "TRUCK";
   return state.config.zoneVehicle[store.zona] || "3/4";
 }
 
 function maxStopsForZone(zona) {
   return state.config.zoneMaxStops[zona] || state.config.maxStopsPerRoute || 10;
+}
+
+function transportadoraForZone(zona) {
+  return state.config.zoneTransportadora[zona] || "";
+}
+
+// União de todas as zonas conhecidas (depósito padrão, veículo padrão, transportadora, limite de
+// paradas) — usada pra montar as tabelas da tela de Configurações, já que uma zona de rota direta
+// (ex.: "TO", "AC") pode ter veículo/transportadora definidos sem ter um depósito próprio.
+function allKnownZones() {
+  const set = new Set([
+    ...Object.keys(state.config.zoneDepot),
+    ...Object.keys(state.config.zoneVehicle),
+    ...Object.keys(state.config.zoneMaxStops),
+    ...Object.keys(state.config.zoneTransportadora),
+  ]);
+  return Array.from(set).sort();
 }
 
 /* ---------------- Clustering engine (varredura polar + bin packing) ---------------- */
@@ -794,7 +821,51 @@ function binPackByCapacity(depot, vehicle, stores, zona) {
     cur.sec += s.palletSeco || 0; cur.tot += s.palletTotal || 0;
   }
   flush();
-  return bins;
+  return mergeAdjacentBins(vehicle, bins, maxStops);
+}
+
+// A varredura polar acima é uma versão do "sweep algorithm" clássico de VRP — monta os bins em
+// ordem angular e fecha um bin assim que a próxima loja não cabe mais (Next-Fit). O problema
+// conhecido do Next-Fit: uma vez fechado, um bin nunca é reaproveitado, mesmo que sobre bastante
+// capacidade nele e a loja seguinte (por ângulo, ou seja, geograficamente vizinha) fosse pequena
+// o bastante pra caber. Isso gera muito mais rotas do que o necessário. Esse passo de
+// consolidação tenta juntar bins ADJACENTES (vizinhos no próprio sweep, logo também vizinhos no
+// mapa) sempre que a soma das duas cargas ainda cabe no veículo e no limite de paradas — só isso
+// já aproxima bastante a taxa de ocupação por rota do que uma roteirização manual bem feita
+// consegue, sem abrir mão da proximidade geográfica que o sweep já garante.
+function mergeAdjacentBins(vehicle, bins, maxStops) {
+  const totals = (bin) => bin.reduce((acc, s) => {
+    acc.m3 += s.m3; acc.kg += s.peso;
+    acc.con += s.palletCongelado || 0; acc.res += s.palletResfriado || 0;
+    acc.sec += s.palletSeco || 0; acc.tot += s.palletTotal || 0;
+    return acc;
+  }, { m3: 0, kg: 0, con: 0, res: 0, sec: 0, tot: 0 });
+
+  let merged = bins.map(b => [...b]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (let i = 0; i < merged.length - 1; i++) {
+      const a = merged[i], b = merged[i + 1];
+      if (a.length + b.length > maxStops) continue;
+      const ta = totals(a), tb = totals(b);
+      const cabe =
+        ta.m3 + tb.m3 <= vehicle.m3 &&
+        ta.kg + tb.kg <= vehicle.kg &&
+        (!state.hasPalletData || (
+          ta.con + tb.con <= vehicle.palletCongelado &&
+          ta.res + tb.res <= vehicle.palletResfriado &&
+          ta.sec + tb.sec <= vehicle.palletSeco &&
+          ta.tot + tb.tot <= vehicle.palletTotal
+        ));
+      if (cabe) {
+        merged.splice(i, 2, [...a, ...b]);
+        changed = true;
+        break; // reinicia a varredura — os índices mudaram
+      }
+    }
+  }
+  return merged;
 }
 
 /* ---- Caminho 3: fallback local (varredura polar + bin packing por haversine) ---- */
@@ -1268,13 +1339,17 @@ function buildRouteCardEl(route) {
   const horarioWarnBadge = route._horarioViolado
     ? `<span class="route-engine danger" title="Uma ou mais lojas desta rota têm horário obrigatório (🕐) que a sequência calculada não cumpre — confira loja por loja">⚠ horário</span>`
     : "";
+  const transportadora = transportadoraForZone(route.zona);
+  const transportadoraBadge = transportadora
+    ? `<span class="route-engine" style="background:var(--primary-tint);color:var(--primary-2)" title="Transportadora padrão desta zona">${transportadora}</span>`
+    : "";
 
   card.innerHTML = `
     <div class="route-head">
       <div class="route-swatch" style="background:${color}"></div>
       <div>
         <div class="route-code" title="Clique pra renomear">${route.code || `<span class="route-code-placeholder">Nomear rota…</span>`}</div>
-        <div class="route-depot">${route.depot.sigla} · ${stopCountBadge} paradas ${engineBadge}${horarioWarnBadge}</div>
+        <div class="route-depot">${route.depot.sigla} · ${stopCountBadge} paradas ${engineBadge}${horarioWarnBadge}${transportadoraBadge}</div>
       </div>
       <div class="spacer"></div>
       <button class="route-truck-icon-btn truck-view-btn" data-route-id="${route.id}" title="Ver caminhão desta rota">+</button>
@@ -1793,7 +1868,7 @@ function renderConfigTab() {
 
   const tuv = document.querySelector("#tblZoneVehicle tbody");
   tuv.innerHTML = "";
-  Object.keys(state.config.zoneDepot).sort().forEach(zona => {
+  allKnownZones().forEach(zona => {
     const tr = document.createElement("tr");
     const current = state.config.zoneVehicle[zona] || "3/4";
     const options = state.config.vehicles.map(v => `<option value="${v.codigo}" ${v.codigo === current ? "selected" : ""}>${v.codigo}</option>`).join("");
@@ -1804,9 +1879,22 @@ function renderConfigTab() {
     tuv.appendChild(tr);
   });
 
+  const tut = document.querySelector("#tblZoneTransportadora tbody");
+  tut.innerHTML = "";
+  allKnownZones().forEach(zona => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `<td>${zona}</td><td><input value="${state.config.zoneTransportadora[zona] || ""}" placeholder="—" /></td>`;
+    tr.querySelector("input").addEventListener("change", (e) => {
+      const v = e.target.value.trim().toUpperCase();
+      if (v) state.config.zoneTransportadora[zona] = v; else delete state.config.zoneTransportadora[zona];
+      saveConfig(); renderAll();
+    });
+    tut.appendChild(tr);
+  });
+
   const tms = document.querySelector("#tblZoneMaxStops tbody");
   tms.innerHTML = "";
-  Object.keys(state.config.zoneDepot).sort().forEach(zona => {
+  allKnownZones().forEach(zona => {
     const tr = document.createElement("tr");
     const current = state.config.zoneMaxStops[zona] || "";
     tr.innerHTML = `<td>${zona}</td><td><input type="number" min="1" placeholder="${state.config.maxStopsPerRoute || 10} (padrão)" value="${current}" /></td>`;
@@ -1816,21 +1904,6 @@ function renderConfigTab() {
       saveConfig(); runClustering();
     });
     tms.appendChild(tr);
-  });
-
-  const chips = document.getElementById("zoneTruckChips");
-  chips.innerHTML = "";
-  Object.keys(state.config.zoneDepot).sort().forEach(zona => {
-    const active = state.config.zoneAllowTruck.includes(zona);
-    const chip = document.createElement("button");
-    chip.className = "btn btn-sm " + (active ? "btn-primary" : "btn-line");
-    chip.textContent = zona;
-    chip.addEventListener("click", () => {
-      const i = state.config.zoneAllowTruck.indexOf(zona);
-      if (i === -1) state.config.zoneAllowTruck.push(zona); else state.config.zoneAllowTruck.splice(i, 1);
-      saveConfig(); renderConfigTab(); runClustering();
-    });
-    chips.appendChild(chip);
   });
 
   const tzo = document.querySelector("#tblZoneOverride tbody");
@@ -1934,14 +2007,7 @@ function exportCsv() {
     return;
   }
 
-  const header = [
-    "CALL.ID", "CALL.NAME", "CALL.DEPOTID", "CALL.ORDDETS3", "CALL.TDATA01", "CALL.TDATA05",
-    "FN_JOHN_WB_MBBRAZILLOADINGSTART", "FN_JOHN_WB_MBBRAZILSHIFTSTART", "FN_JOHN_WB_MBBRAZILDEPOTDEPART",
-    "FN_JOHN_WB_MBBRAZILCALLARRIVALTIME", "FN_JOHN_WB_MBBRAZILDEPOTRETURN",
-    "CALL.ROUTENO", "CALL.ROUTEPOS", "FN_JOHN_WB_MBBRAZILVEHICLE", "CALL.TRVDISPRV",
-    "FN_JOHN_WB_MBBROUTETIME", "FN_JOHN_WB_MBBROUTEDIST",
-  ];
-
+  const header = buildExportHeader();
   const lines = [header.map(h => `"${h}"`).join(",")];
 
   state.routes.forEach((route, ri) => {
@@ -1954,7 +2020,7 @@ function exportCsv() {
           store.custId, store.codigo, route.depot.sigla, r["CALL.ORDDETS3"] || "",
           route.code, r["CALL.TDATA05"] || "",
           fmtTime(tl.loadingStart), fmtTime(tl.shiftStart), fmtTime(tl.depotDepart), fmtTime(arrival), fmtTime(tl.depotReturn),
-          ri + 1, pos, route.vehicle.codigo, dist.toFixed(2),
+          ri + 1, pos, vehicleExportCode(route), dist.toFixed(2),
           fmtMinAsHHMM(tl.totalMin), tl.totalDist.toFixed(2),
         ];
         lines.push(row.map(v => `"${v}"`).join(","));
@@ -1962,6 +2028,37 @@ function exportCsv() {
     });
   });
 
+  downloadCsv(lines);
+  toast("Arquivo exportado. Pronto para devolver ao JDE.", "success");
+}
+
+// Formato composto observado no arquivo final do Paragon: "{TRANSPORTADORA}-{VEÍCULO}-GR" (ex.:
+// "LOG-3/4-GR", "PRO-TRU-GR", "SGT-VUC-GR" — o sufixo "GR" aparece em toda linha, de todo
+// depósito, num pedido real de exemplo comparado; o motivo exato não está confirmado, mas como é
+// constante, replicá-lo deixa o CALL.DEPOTID... digo, o FN_JOHN_WB_MBBRAZILVEHICLE no formato que
+// o JDE já espera. Só monta o composto quando a zona tem transportadora cadastrada — sem isso,
+// cai no código de veículo simples de sempre, pra não inventar prefixo.
+const TRANSPORTADORA_PREFIX = { PRODELOG: "PRO", LOGMAN: "LOG", SGT: "SGT" };
+const VEHICLE_EXPORT_ABBR = { "3/4": "3/4", VUC: "VUC", TRUCK: "TRU", CARRETA: "CAR" };
+function vehicleExportCode(route) {
+  const transportadora = transportadoraForZone(route.zona);
+  if (!transportadora) return route.vehicle.codigo;
+  const prefix = TRANSPORTADORA_PREFIX[transportadora] || transportadora.slice(0, 3).toUpperCase();
+  const abbr = VEHICLE_EXPORT_ABBR[route.vehicle.codigo] || route.vehicle.codigo;
+  return `${prefix}-${abbr}-GR`;
+}
+
+function buildExportHeader() {
+  return [
+    "CALL.ID", "CALL.NAME", "CALL.DEPOTID", "CALL.ORDDETS3", "CALL.TDATA01", "CALL.TDATA05",
+    "FN_JOHN_WB_MBBRAZILLOADINGSTART", "FN_JOHN_WB_MBBRAZILSHIFTSTART", "FN_JOHN_WB_MBBRAZILDEPOTDEPART",
+    "FN_JOHN_WB_MBBRAZILCALLARRIVALTIME", "FN_JOHN_WB_MBBRAZILDEPOTRETURN",
+    "CALL.ROUTENO", "CALL.ROUTEPOS", "FN_JOHN_WB_MBBRAZILVEHICLE", "CALL.TRVDISPRV",
+    "FN_JOHN_WB_MBBROUTETIME", "FN_JOHN_WB_MBBROUTEDIST",
+  ];
+}
+
+function downloadCsv(lines) {
   const blob = new Blob(["\uFEFF" + lines.join("\r\n")], { type: "text/csv;charset=utf-8;" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
@@ -1969,7 +2066,6 @@ function exportCsv() {
   a.href = url; a.download = `roteirizacao_${stamp}.csv`;
   a.click();
   URL.revokeObjectURL(url);
-  toast("Arquivo exportado. Pronto para devolver ao JDE.", "success");
 }
 
 /* ---------------- Wiring ---------------- */

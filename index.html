@@ -117,7 +117,7 @@
 
         <div class="config-section">
           <h4>Veículo padrão por zona</h4>
-          <p class="hint">Exceções ao veículo padrão (3/4) para regiões específicas.</p>
+          <p class="hint">Exceções ao veículo padrão (3/4) para regiões específicas — inclui as zonas de rota direta/viagem (sem cross-dock local), que usam Truck ou Carreta o tempo todo.</p>
           <table class="cfg-table" id="tblZoneVehicle">
             <thead><tr><th>Zona</th><th>Veículo</th></tr></thead>
             <tbody></tbody>
@@ -125,9 +125,12 @@
         </div>
 
         <div class="config-section">
-          <h4>Zonas com Truck liberado</h4>
-          <p class="hint">Quando uma rota estoura o limite do veículo padrão, o motor pode escalar para Truck nessas zonas.</p>
-          <div id="zoneTruckChips" style="display:flex;flex-wrap:wrap;gap:6px"></div>
+          <h4>Transportadora padrão por zona</h4>
+          <p class="hint">Só informativo — aparece no card da rota e no export. Cada zona costuma ser atendida por uma única transportadora.</p>
+          <table class="cfg-table" id="tblZoneTransportadora">
+            <thead><tr><th>Zona</th><th>Transportadora</th></tr></thead>
+            <tbody></tbody>
+          </table>
         </div>
 
         <div class="config-section">

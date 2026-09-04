@@ -153,3 +153,44 @@ TomTom e Mapbox têm cota gratuita mensal generosa para o volume de uma operaç�
 estourar num dia, o sistema cai sozinho pra estimativa local e avisa na tela — nenhuma rota
 é perdida, só fica menos precisa.
 
+## Veículo e transportadora por zona, e consolidação de rotas
+
+Comparando um pedido real roteirizado pelo sistema com o mesmo pedido finalizado no Paragon
+(depois do ajuste manual), duas coisas ficaram claras e foram corrigidas:
+
+1. **O sistema estava gerando muito mais rotas do que precisava** (num exemplo real, 169
+   rotas contra 51 do Paragon pro mesmo pedido — média de ~2 paradas/rota contra ~6,5 do
+   Paragon). A causa: o agrupamento por varredura angular (sweep) fecha uma rota assim que a
+   próxima loja não cabe mais no veículo atual e **nunca reaproveita** esse espaço sobrando —
+   um problema clássico do algoritmo "Next-Fit". Agora, depois da varredura, um passo de
+   consolidação tenta juntar rotas **vizinhas** (logo, também próximas no mapa) sempre que a
+   carga somada ainda cabe no veículo e no limite de paradas — sem abrir mão da proximidade
+   geográfica que a varredura já garante.
+2. **Veículo por zona estava errado pra várias zonas**: o sistema forçava Truck sempre pra
+   BA/MT/GO/DF/AM/PI/CE/PE, mas a planilha oficial de transportadoras e o comparativo com o
+   Paragon mostram que BA/MT/GO/DF usam 3/4 na imensa maioria das rotas — só zonas de
+   **rota direta/viagem** (sem cross-dock local: BS, IG, JF, NF, SR, TO, ML, GS, RO, SM, MS,
+   TM, NO, MD, RP, SJ) usam Truck o tempo todo, e AC usa Carreta (28 posições de palete,
+   veículo novo adicionado). Isso agora é uma única tabela "Veículo padrão por zona" em
+   Configurações (o antigo "Zonas com Truck liberado" foi removido, por ser uma segunda regra
+   sobreposta e desatualizada).
+
+A tabela "Transportadora padrão por zona" (também nova) é só informativa — mostra no card da
+rota e no arquivo de export qual transportadora atende cada zona (ex.: `RJ → LOGMAN`). No
+export, quando a zona tem transportadora cadastrada, o veículo sai no formato composto que o
+Paragon realmente usa (ex.: `PRO-VUC-GR`, `SGT-TRU-GR`) em vez do código simples (`VUC`,
+`TRUCK`) — confirmado comparando com um arquivo finalizado real. Sem transportadora
+cadastrada pra zona, cai no código simples de sempre.
+
+## Base de depósitos (CDs)
+
+Atualizada a partir de uma planilha oficial de cross-dockings da MB: endereços/coordenadas
+mais precisos, dois erros de sinal de coordenada corrigidos (CDES e o depósito antigo "CDPE",
+que tinham latitude/longitude positiva por engano — o que colocaria o depósito no meio do
+oceano), e três depósitos novos cadastrados: **CDES** (Cariacica/ES — antes as lojas do ES
+caíam no CDGR por falta de cadastro), **CDJD** (Jundiaí/SP — resolve a exceção antiga de
+cross-dock de SP que ficava sinalizada como "confirmar"), e **CDRS** (Sapucaia do Sul/RS). O
+antigo "CDPE" foi renomeado pra **CDNE** (mesma cidade, Cabo de Santo Agostinho — só o código
+mudou, pra bater com o cadastro oficial); se o JDE ainda mandar `CDPE` pra alguma loja, o
+motor cai no fallback por zona e resolve certo do mesmo jeito.
+
