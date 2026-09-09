@@ -76,10 +76,11 @@ das janelas e sinaliza com um aviso quando não é totalmente possível.
 
 ## Encaixes (SA) e rota em branco
 
-Quando uma linha do pedido chega sem rota definida (ou marcada "EXT"), ela é tratada como um
-encaixe ("SA") e aparece num painel próprio acima da lista de rotas, pra ser arrastada loja por
-loja pra uma rota existente. *(Nesta versão o painel já existe mas a detecção — qual coluna do
-arquivo indica isso — ainda depende de confirmação com uma planilha de exemplo real.)*
+Quando uma loja chega com `CALL.TEXT01` em branco ou marcado "EXT" no pedido do JDE (não entrou
+em nenhuma rota de faturamento do dia), ela é tratada como um encaixe ("SA") e aparece num painel
+próprio acima da lista de rotas, pra ser arrastada loja por loja pra uma rota existente — não
+entra na roteirização automática. Confirmado com um pedido real (a coluna existe e vem vazia
+exatamente nesses casos); se o arquivo importado não tiver essa coluna, ninguém vira encaixe.
 
 Use o botão "+ Rota" pra criar uma rota em branco (nome vazio, editável) — útil tanto para
 receber encaixes quanto para dividir a carga de uma loja que não cabe inteira num veículo
@@ -186,7 +187,14 @@ rota e no arquivo de export qual transportadora atende cada zona (ex.: `RJ → L
 export, quando a zona tem transportadora cadastrada, o veículo sai no formato composto que o
 Paragon realmente usa (ex.: `PRO-VUC-GR`, `SGT-TRU-GR`) em vez do código simples (`VUC`,
 `TRUCK`) — confirmado comparando com um arquivo finalizado real. Sem transportadora
-cadastrada pra zona, cai no código simples de sempre.
+cadastrada pra zona, cai no código simples de sempre. `SP`/`LN`/`LT`/`VP` usam frota própria
+(`MBR`) e `CP` usa `YES` — confirmado num segundo pedido real (região de CDGR), depois de
+adicionados os dois com o mesmo teste comparativo do item 1.
+
+**Validação com um segundo pedido real** (CDGR, 238 lojas): o sistema (com a consolidação
+acima) gerou 38 rotas — o Paragon, pro mesmo pedido, gerou 41. Antes da consolidação, o mesmo
+pedido teria gerado perto de 100 rotas (é o que um export gerado com uma versão desatualizada
+mostrou) — a melhoria é real, não só de um caso isolado.
 
 ## Base de depósitos (CDs)
 

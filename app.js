@@ -266,6 +266,7 @@ function importRows(rows, fileName) {
         horarioRaw: r["CALL.ORDDETS1"] || "",
         horario: parseHorarioJde(r["CALL.ORDDETS1"]),
         horarioOverride: null,
+        preRota: (r["CALL.TEXT01"] || "").trim().toUpperCase(),
         rows: [],
         porCamara: {}, // congelado/resfriado/seco -> {peso, m3, caixas, rows} — ver camaraKeyFromRow()
       });
@@ -287,14 +288,19 @@ function importRows(rows, fileName) {
     }
   }
 
-  state.stores = Array.from(byStore.values());
+  const todasAsLojas = Array.from(byStore.values());
 
-  // "Encaixes (SA)": lojas cuja rota já vem em branco ou "EXT" no pedido do JDE (não entraram
-  // na roteirização automática do dia — encaixe manual noutra rota). A coluna exata que carrega
-  // essa informação no arquivo ainda precisa ser confirmada numa planilha de exemplo real antes
-  // de ligar a detecção aqui (classificar errado numa planilha de produção é pior que não
-  // classificar) — o painel "Encaixes" já existe na tela, só fica vazio até isso ser confirmado.
-  state.saStores = [];
+  // "Encaixes (SA)": lojas cuja rota já vem em branco ou "EXT" em CALL.TEXT01 no pedido do JDE —
+  // confirmado num pedido real (a mesma loja não entrou em nenhuma rota de faturamento do dia,
+  // fica marcada com um CALL.ROUTENO "coringa" à parte). Só ativa quando a coluna existe no
+  // arquivo — sem ela, ninguém vira encaixe (evita classificar errado num formato diferente).
+  if (cols.includes("CALL.TEXT01")) {
+    state.stores = todasAsLojas.filter(s => s.preRota && s.preRota !== "EXT");
+    state.saStores = todasAsLojas.filter(s => !s.preRota || s.preRota === "EXT");
+  } else {
+    state.stores = todasAsLojas;
+    state.saStores = [];
+  }
 
   document.getElementById("brand-sub").textContent =
     `${fileName} · ${state.stores.length} lojas`;
@@ -374,7 +380,7 @@ function importDetalhe(rows, fileName) {
 
 function applyPalletDataToStores() {
   if (!state.detalhePorLoja) return;
-  state.stores.forEach(s => {
+  [...state.stores, ...state.saStores].forEach(s => {
     const d = state.detalhePorLoja[s.codigo];
     if (d) {
       s.palletCongelado = d.congelado;
