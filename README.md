@@ -54,8 +54,10 @@ com a estimativa local, já que as funções serverless não existem fora de um 
    ser recalculada — use "Reagrupar" para mandar tudo de volta pra API). A barra de busca/ações
    fica fixa no topo da lista ao rolar. O botão "⇄ Trocar lojas" abre duas cópias da lista de
    rotas lado a lado (cada uma expande/seleciona independente da outra) com mais espaço pra
-   arrastar entre rotas distantes na lista, mais um mapa pequeno das rotas em cima — clique numa
-   linha do mapa pra ver o nome da rota.
+   arrastar entre rotas distantes na lista, um mapa das rotas em cima (clique numa linha — no
+   mapa ou no card da rota, em qualquer coluna — pra destacar ela por cima das outras; dá pra
+   destacar uma rota de cada coluna ao mesmo tempo), e os Encaixes (SA) também aparecem ali
+   (clique numa loja de encaixe pra ver ela marcada no mapa e comparar com as rotas destacadas).
 4. Clique em "Exportar para o JDE" para gerar o CSV de retorno.
 
 ## Horário de entrega da loja (Call.ORDDETS1)

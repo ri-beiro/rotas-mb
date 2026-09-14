@@ -354,7 +354,7 @@ button, input, select { font-family: inherit; }
   border: 1px solid var(--border); display: flex; flex-direction: column;
 }
 .config-modal-body { overflow-y: auto; }
-.swap-modal { max-width: 1080px; }
+.swap-modal { max-width: 1280px; height: 92vh; max-height: 92vh; }
 .swap-modal-body {
   display: grid; grid-template-columns: 1fr 1fr; gap: 0; overflow: hidden; flex: 1; min-height: 0;
 }
@@ -363,7 +363,16 @@ button, input, select { font-family: inherit; }
 .swap-col-title { font-size: 11px; font-weight: 700; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.04em; padding: 4px 4px 10px; }
 
 .swap-map-wrap { flex-shrink: 0; border-bottom: 1px solid var(--border); background: #dfe6ea; }
-#swapMiniMap { height: 190px; width: 100%; }
+#swapMiniMap { height: 380px; width: 100%; }
+.swap-sa-list { max-height: 130px; overflow-y: auto; }
+.sa-map-marker {
+  width: 28px; height: 28px; border-radius: 50%; background: var(--warning); color: #fff;
+  display: grid; place-items: center; font-size: 15px; box-shadow: 0 0 0 3px rgba(180,121,15,0.3), var(--shadow-2);
+  border: 2px solid #fff;
+}
+@media (max-width: 900px) {
+  #swapMiniMap { height: 240px; }
+}
 @media (max-width: 720px) {
   .swap-modal-body { grid-template-columns: 1fr; }
   .swap-col:first-child { border-right: none; border-bottom: 1px solid var(--border); }

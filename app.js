@@ -1482,7 +1482,8 @@ function attachRouteCodeEditor(codeEl, route) {
 // Uma linha de loja — usada na lista de rotas, nas duas colunas do modal "Trocar lojas" e no
 // painel de "Encaixes (SA)" (nesse último, `route` vem null: a loja ainda não pertence a
 // nenhuma rota, só pode ser arrastada PARA uma).
-function buildStopRowEl(s, i, route) {
+function buildStopRowEl(s, i, route, opts) {
+  opts = opts || {};
   const row = document.createElement("div");
   row.className = "stop-row";
   row.draggable = true;
@@ -1515,6 +1516,8 @@ function buildStopRowEl(s, i, route) {
     e.stopPropagation();
     toggleStopCamDetail(row, s, route);
   });
+
+  if (opts.onRowClick) row.addEventListener("click", () => opts.onRowClick(s, row));
 
   return row;
 }
@@ -1581,18 +1584,47 @@ function renderSwapModal() {
     el.innerHTML = "";
     state.routes.forEach(route => el.appendChild(buildRouteCardEl(route, scope)));
   });
+  renderSwapSaStrip();
   renderSwapMiniMap();
 }
 
+// Encaixes (SA) também aparecem aqui (não só na barra lateral) — dá pra arrastar direto pra
+// qualquer rota de qualquer uma das duas colunas. Clicar numa loja de encaixe destaca ela no
+// mini-mapa (marcador grande), pra ajudar a visualizar qual rota passa mais perto.
+function renderSwapSaStrip() {
+  const wrap = document.getElementById("swapSaStrip");
+  const listEl = document.getElementById("swapSaList");
+  const countEl = document.getElementById("swapSaCount");
+  if (!wrap || !listEl) return;
+  const stores = state.saStores || [];
+  wrap.style.display = stores.length ? "block" : "none";
+  if (countEl) countEl.textContent = String(stores.length);
+  listEl.innerHTML = "";
+  stores.forEach((s, i) => listEl.appendChild(buildStopRowEl(s, i, null, { onRowClick: highlightSaStoreOnSwapMap })));
+}
+
 /* ---------------- Mini-mapa do modal "Trocar lojas" ---------------- */
-// Mapa próprio (menor), só pra comparar visualmente as rotas enquanto arrasta lojas entre elas
-// — clicar numa linha mostra o nome da rota (popup) e destaca ela mais grossa.
+// Mapa próprio (maior que antes), só pra comparar visualmente as rotas enquanto arrasta lojas
+// entre elas. Clicar numa linha (no mapa OU no card da rota, em qualquer uma das duas colunas)
+// destaca essa rota por cima das outras — clicar em rotas diferentes na coluna A e na B destaca
+// as duas ao mesmo tempo. Clicar numa loja de encaixe (SA) destaca ela com um marcador.
 let swapMiniMap = null;
-let swapMiniMapHighlighted = null;
+let swapMapExtraHighlights = new Set(); // rotas destacadas só pelo clique direto numa linha do mapa
+let swapMapSaMarker = null;
+
+// União do que está aberto em cada coluna (state.swapSelection) com o que foi clicado direto
+// no mapa — é isso que decide quais linhas aparecem "por cima" das outras.
+function swapHighlightedRouteIds() {
+  const ids = new Set(swapMapExtraHighlights);
+  if (state.swapSelection.A) ids.add(state.swapSelection.A);
+  if (state.swapSelection.B) ids.add(state.swapSelection.B);
+  return ids;
+}
+
 function ensureSwapMiniMap() {
   if (swapMiniMap) return;
   try {
-    swapMiniMap = L.map("swapMiniMap", { zoomControl: false, attributionControl: false }).setView([-15.78, -47.93], 3.6);
+    swapMiniMap = L.map("swapMiniMap", { zoomControl: true, attributionControl: false }).setView([-15.78, -47.93], 3.6);
     L.tileLayer(
       `https://api.mapbox.com/styles/v1/mapbox/light-v11/tiles/{z}/{x}/{y}@2x?access_token=${MAPBOX_TOKEN}`,
       { maxZoom: 19, tileSize: 512, zoomOffset: -1 }
@@ -1601,6 +1633,19 @@ function ensureSwapMiniMap() {
   } catch (err) {
     console.error("Falha ao iniciar o mini-mapa do modal 'Trocar lojas':", err);
   }
+}
+
+// Só reaplica peso/opacidade/bringToFront nas linhas já existentes (setStyle), sem recriar os
+// layers — recriar fecharia um popup que o próprio Leaflet acabou de abrir com esse clique.
+function restyleSwapMiniMapLines() {
+  if (!swapMiniMap) return;
+  const highlighted = swapHighlightedRouteIds();
+  const anyHighlighted = highlighted.size > 0;
+  swapMiniMap._routeLayers.forEach(l => {
+    const isH = highlighted.has(l._routeId);
+    l.setStyle({ weight: isH ? 6 : 2.2, opacity: isH ? 1 : (anyHighlighted ? 0.12 : 0.6) });
+    if (isH) l.bringToFront();
+  });
 }
 
 function renderSwapMiniMap() {
@@ -1615,27 +1660,35 @@ function renderSwapMiniMap() {
     const color = state.colorByRoute[route.id];
     const straightLatlngs = [[route.depot.lat, route.depot.long], ...route.stores.map(s => [s.lat, s.lng])];
     const latlngs = route.geometry && route.geometry.length ? route.geometry : straightLatlngs;
-    const isHighlighted = swapMiniMapHighlighted === route.id;
-    const line = L.polyline(latlngs, {
-      color, weight: isHighlighted ? 5 : 2.5, opacity: isHighlighted ? 1 : 0.6,
-    }).addTo(swapMiniMap);
+    const line = L.polyline(latlngs, { color, weight: 2.2, opacity: 0.6 }).addTo(swapMiniMap);
     line._routeId = route.id;
     line.bindPopup(`<b>${route.code || "(sem nome)"}</b><br>${route.stores.length} parada${route.stores.length === 1 ? "" : "s"}`);
-    // Só ajusta o estilo das linhas já existentes (setStyle), sem recriar os layers — recriar
-    // fecharia o popup que o próprio Leaflet acabou de abrir com esse mesmo clique.
     line.on("click", () => {
-      swapMiniMapHighlighted = swapMiniMapHighlighted === route.id ? null : route.id;
-      swapMiniMap._routeLayers.forEach(l => {
-        const isH = l._routeId === swapMiniMapHighlighted;
-        l.setStyle({ weight: isH ? 5 : 2.5, opacity: isH ? 1 : 0.6 });
-      });
+      if (swapMapExtraHighlights.has(route.id)) swapMapExtraHighlights.delete(route.id);
+      else swapMapExtraHighlights.add(route.id);
+      restyleSwapMiniMapLines();
     });
     swapMiniMap._routeLayers.push(line);
     latlngs.forEach(ll => bounds.push(ll));
   });
 
+  restyleSwapMiniMapLines();
   if (bounds.length) swapMiniMap.fitBounds(bounds, { padding: [16, 16] });
   setTimeout(() => swapMiniMap && swapMiniMap.invalidateSize(), 60);
+}
+
+// Destaca uma loja de encaixe (SA) no mini-mapa com um marcador grande, sem mexer nas rotas já
+// destacadas — assim dá pra comparar a loja com a(s) rota(s) aberta(s) ao mesmo tempo.
+function highlightSaStoreOnSwapMap(store) {
+  ensureSwapMiniMap();
+  if (!swapMiniMap) return;
+  if (swapMapSaMarker) swapMiniMap.removeLayer(swapMapSaMarker);
+  swapMapSaMarker = L.marker([store.lat, store.lng], {
+    icon: L.divIcon({ className: "", html: `<div class="sa-map-marker">★</div>`, iconSize: [28, 28] }),
+    zIndexOffset: 1000,
+  }).addTo(swapMiniMap);
+  swapMapSaMarker.bindPopup(`<b>${store.codigo}</b><br>Encaixe (SA) — arraste pra uma rota`).openPopup();
+  swapMiniMap.panTo([store.lat, store.lng]);
 }
 
 /* ---------------- Janela de horário: edição inline (popover) ---------------- */
