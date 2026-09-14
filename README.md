@@ -52,6 +52,14 @@ com a estimativa local, já que as funções serverless não existem fora de um 
 ## Como usar
 
 1. Importe o pedido exportado do JDE (Painel de Controle da Interface) — aceita `.csv` ou `.xlsx`.
+   Se você editar o `.csv` manualmente (ex.: corrigir a lat/long de uma loja) numa planilha com
+   configuração regional que usa `;` como separador de lista (comum em português do Brasil), a
+   planilha pode não reconhecer a `,` do arquivo original como separador — todo o conteúdo cai
+   numa coluna só, e ao salvar de novo como CSV essa coluna vira "uma linha inteira dentro de um
+   campo só" (aspas dobradas por fora). O sistema detecta esse padrão e desembrulha sozinho antes
+   de importar (loga um aviso no console: `[import] "<arquivo>" veio com a linha inteira dentro
+   de um campo só...`) — mas se puder, edite o CSV num editor de texto simples, ou confirme que
+   a planilha está usando `,` como separador ao salvar, pra evitar o problema na origem.
 2. O motor agrupa as lojas em rotas automaticamente, respeitando:
    - o depósito de origem que o próprio JDE já define (`CALL.DEPOTID`),
    - exceções de cross-dock cadastradas em Configurações (botão no topo),

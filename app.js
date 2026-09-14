@@ -210,6 +210,24 @@ function detectCsvEncoding(buffer) {
   }
 }
 
+// Detecta o caso em que o arquivo inteiro virou "CSV dentro de CSV": cada linha aparece como um
+// ÚNICO campo gigante (em vez das ~25 colunas esperadas), porque alguém abriu o CSV original
+// numa planilha que não reconheceu a vírgula como separador (comum com config regional PT-BR,
+// que usa ";" como separador de lista) — o arquivo inteiro caiu na coluna A, e ao salvar de novo
+// como CSV, essa coluna A (que já continha vírgulas e aspas) foi re-envolvida entre aspas, com
+// as aspas internas dobradas. O parser está correto ao ler isso como 1 campo só — o problema é
+// no arquivo, não na leitura — mas dá pra desembrulhar automaticamente e importar mesmo assim.
+function looksDoubleEncodedCsv(fields) {
+  if (fields.length !== 1) return false;
+  const marcadores = ["CUST.LAT", "CUST.LONG", "CALL.TEXT03", "CALL.USER01", "CALL.DEPOTID"];
+  return marcadores.filter(m => fields[0].includes(m)).length >= 3;
+}
+
+function unwrapDoubleEncodedCsv(fieldName, rows) {
+  const linhas = [fieldName, ...rows.map(r => r[fieldName])];
+  return Papa.parse(linhas.join("\r\n"), { header: true, skipEmptyLines: true }).data;
+}
+
 function readTabularFile(file, onRows, onError) {
   const isExcel = /\.xlsx?$/i.test(file.name);
   if (isExcel) {
@@ -229,7 +247,15 @@ function readTabularFile(file, onRows, onError) {
       .then(buf => {
         Papa.parse(file, {
           header: true, skipEmptyLines: true, encoding: detectCsvEncoding(buf),
-          complete: (res) => onRows(res.data),
+          complete: (res) => {
+            const fields = res.meta.fields || [];
+            if (looksDoubleEncodedCsv(fields)) {
+              console.warn(`[import] "${file.name}" veio com a linha inteira dentro de um campo só (provável reexportação via planilha com separador diferente) — desembrulhando antes de importar.`);
+              onRows(unwrapDoubleEncodedCsv(fields[0], res.data));
+              return;
+            }
+            onRows(res.data);
+          },
           error: onError,
         });
       })
