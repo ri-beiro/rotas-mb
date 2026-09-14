@@ -1512,6 +1512,7 @@ function buildRouteCardEl(route, scope) {
       <div class="spacer"></div>
       <button class="route-truck-icon-btn route-recalc-btn" data-route-id="${route.id}" title="Recalcular rota real pelas ruas (TomTom) SEM alterar a sequência das lojas">↻</button>
       <button class="route-truck-icon-btn truck-view-btn" data-route-id="${route.id}" title="Ver caminhão desta rota">+</button>
+      <button class="route-truck-icon-btn danger route-delete-btn" data-route-id="${route.id}" title="${route.stores.length ? "Excluir rota (lojas voltam pros Encaixes)" : "Excluir rota em branco"}">🗑</button>
       <select class="route-vehicle" title="Trocar o veículo desta rota">
         ${state.config.vehicles.map(v => `<option value="${v.codigo}" ${v.codigo === route.vehicle.codigo ? "selected" : ""}>${v.codigo}</option>`).join("")}
       </select>
@@ -1567,6 +1568,12 @@ function buildRouteCardEl(route, scope) {
     recalcRouteReal(route, recalcBtn);
   });
 
+  const deleteBtn = card.querySelector(".route-delete-btn");
+  if (deleteBtn) deleteBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    deleteRoute(route.id);
+  });
+
   card.addEventListener("dragover", (e) => { e.preventDefault(); card.classList.add("drag-over"); });
   card.addEventListener("dragleave", () => card.classList.remove("drag-over"));
   card.addEventListener("drop", (e) => onStopDrop(e, route.id));
@@ -1611,6 +1618,25 @@ function attachRouteCodeEditor(codeEl, route) {
     input.addEventListener("blur", commit);
     input.addEventListener("click", (ev) => ev.stopPropagation());
   });
+}
+
+// Exclui uma rota do sistema. Nunca descarta lojas silenciosamente: se a rota ainda tem parada,
+// elas voltam pro painel de Encaixes (SA) — só uma rota já vazia (em branco, ou esvaziada depois
+// de mover todas as lojas pra outro lugar) é removida sem perguntar nada.
+function deleteRoute(routeId) {
+  const idx = state.routes.findIndex(r => r.id === routeId);
+  if (idx === -1) return;
+  const route = state.routes[idx];
+  if (route.stores.length) {
+    const ok = confirm(`A rota ${route.code || "sem nome"} ainda tem ${route.stores.length} parada(s). Elas vão voltar pro painel de Encaixes (SA). Excluir mesmo assim?`);
+    if (!ok) return;
+    state.saStores = state.saStores || [];
+    state.saStores.push(...route.stores);
+  }
+  state.routes.splice(idx, 1);
+  computeUsage();
+  renderAll();
+  toast(`Rota ${route.code || routeId} excluída.`, "");
 }
 
 // Uma linha de loja — usada na lista de rotas, nas duas colunas do modal "Trocar lojas" e no
@@ -1742,14 +1768,25 @@ function updateSaPanel() {
 }
 
 /* ---------------- Modal "Trocar lojas entre rotas" ---------------- */
+function swapRouteMatchesQuery(route, q) {
+  if (!q) return true;
+  return (route.code || "").toLowerCase().includes(q) ||
+    route.stores.some(s => s.codigo.toLowerCase().includes(q));
+}
+
 function renderSwapModal() {
+  const q = (document.getElementById("swapSearch")?.value || "").trim().toLowerCase();
+  const matched = state.routes.filter(r => swapRouteMatchesQuery(r, q));
   [["swapListA", "A"], ["swapListB", "B"]].forEach(([id, scope]) => {
     const el = document.getElementById(id);
     if (!el) return;
     el.innerHTML = "";
-    state.routes.forEach(route => el.appendChild(buildRouteCardEl(route, scope)));
+    matched.forEach(route => el.appendChild(buildRouteCardEl(route, scope)));
   });
   renderSwapSaStrip();
+  // Busca que já fecha num resultado único destaca essa rota no mini-mapa sozinha — não precisa
+  // clicar em mais nada pra "trazer" a rota buscada. Some de novo se a busca deixar de ser única.
+  swapSearchHighlightId = (q && matched.length === 1) ? matched[0].id : null;
   renderSwapMiniMap();
 }
 
@@ -1775,14 +1812,17 @@ function renderSwapSaStrip() {
 // as duas ao mesmo tempo. Clicar numa loja de encaixe (SA) destaca ela com um marcador.
 let swapMiniMap = null;
 let swapMapExtraHighlights = new Set(); // rotas destacadas só pelo clique direto numa linha do mapa
+let swapSearchHighlightId = null; // rota destacada porque a busca fechou nela sozinha
 let swapMapSaMarker = null;
 
-// União do que está aberto em cada coluna (state.swapSelection) com o que foi clicado direto
-// no mapa — é isso que decide quais linhas aparecem "por cima" das outras.
+// União do que está aberto em cada coluna (state.swapSelection), do que foi clicado direto no
+// mapa e do que a busca encontrou sozinha — é isso que decide quais linhas (e números de parada)
+// aparecem "por cima" das outras.
 function swapHighlightedRouteIds() {
   const ids = new Set(swapMapExtraHighlights);
   if (state.swapSelection.A) ids.add(state.swapSelection.A);
   if (state.swapSelection.B) ids.add(state.swapSelection.B);
+  if (swapSearchHighlightId) ids.add(swapSearchHighlightId);
   return ids;
 }
 
@@ -1795,9 +1835,30 @@ function ensureSwapMiniMap() {
       { maxZoom: 19, tileSize: 512, zoomOffset: -1 }
     ).addTo(swapMiniMap);
     swapMiniMap._routeLayers = [];
+    swapMiniMap._stopMarkers = [];
   } catch (err) {
     console.error("Falha ao iniciar o mini-mapa do modal 'Trocar lojas':", err);
   }
+}
+
+// Mostra "1", "2", 3... em cima de cada loja das rotas destacadas — sem isso, dava pra ver a
+// linha da rota mas não a ordem/posição de cada parada nela sem abrir a lista do lado.
+function renderSwapMiniMapStopMarkers(highlighted) {
+  (swapMiniMap._stopMarkers || []).forEach(m => swapMiniMap.removeLayer(m));
+  swapMiniMap._stopMarkers = [];
+  highlighted.forEach(routeId => {
+    const route = state.routes.find(r => r.id === routeId);
+    if (!route) return;
+    const color = state.colorByRoute[route.id];
+    route.stores.forEach((s, i) => {
+      const marker = L.marker([s.lat, s.lng], {
+        icon: L.divIcon({ className: "", html: `<div class="swap-map-stop-num" style="background:${color}">${i + 1}</div>`, iconSize: [22, 22], iconAnchor: [11, 11] }),
+        zIndexOffset: 900,
+      }).addTo(swapMiniMap);
+      marker.bindTooltip(`${i + 1}. ${s.codigo}`, { direction: "top", offset: [0, -12] });
+      swapMiniMap._stopMarkers.push(marker);
+    });
+  });
 }
 
 // Só reaplica peso/opacidade/bringToFront nas linhas já existentes (setStyle), sem recriar os
@@ -1811,6 +1872,7 @@ function restyleSwapMiniMapLines() {
     l.setStyle({ weight: isH ? 6 : 2.2, opacity: isH ? 1 : (anyHighlighted ? 0.12 : 0.6) });
     if (isH) l.bringToFront();
   });
+  renderSwapMiniMapStopMarkers(highlighted);
 }
 
 function renderSwapMiniMap() {
@@ -2440,6 +2502,7 @@ function wireEvents() {
 
   document.getElementById("btnGerenciarRotas").addEventListener("click", () => {
     if (!state.routes.length) { toast("Importe um pedido e gere as rotas primeiro.", ""); return; }
+    document.getElementById("swapSearch").value = "";
     document.getElementById("swapModal").classList.add("show");
     renderSwapModal();
   });
@@ -2449,6 +2512,7 @@ function wireEvents() {
   document.getElementById("swapModal").addEventListener("click", (e) => {
     if (e.target.id === "swapModal") document.getElementById("swapModal").classList.remove("show");
   });
+  document.getElementById("swapSearch").addEventListener("input", renderSwapModal);
   document.getElementById("swapToggleMap").addEventListener("click", (e) => {
     const area = document.getElementById("swapMapArea");
     const collapsed = area.classList.toggle("collapsed");

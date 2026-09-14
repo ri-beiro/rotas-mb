@@ -79,6 +79,13 @@ com a estimativa local, já que as funções serverless não existem fora de um 
    também aparecem ali (clique numa loja de encaixe pra ver ela marcada no mapa e comparar com
    as rotas destacadas). As setinhas ▲▼ ao lado de cada loja mudam a ordem de entrega dentro da
    mesma rota (também volta pra estimativa local, pelo mesmo motivo do arrastar entre rotas).
+   Uma rota destacada no mapa (por clique na linha ou pela busca abaixo) mostra também um número
+   (1, 2, 3...) em cima de cada loja, na ordem de entrega. O campo de busca no topo do modal
+   filtra as duas colunas por nome de rota ou código de loja — quando sobra uma única rota, ela
+   já é destacada sozinha no mapa, sem precisar clicar em mais nada. O ícone 🗑 em cada rota
+   exclui ela: se ainda tiver loja, elas voltam pro painel de Encaixes (SA) em vez de sumir
+   (só uma rota já vazia — em branco ou esvaziada por arrastar tudo pra outro lugar — é removida
+   sem perguntar nada).
 4. Clique em "Exportar para o JDE" para gerar o CSV de retorno.
 
 ## Horário de entrega da loja (Call.ORDDETS1)

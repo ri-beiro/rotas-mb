@@ -379,6 +379,12 @@ button, input, select { font-family: inherit; }
   display: grid; place-items: center; font-size: 15px; box-shadow: 0 0 0 3px rgba(180,121,15,0.3), var(--shadow-2);
   border: 2px solid #fff;
 }
+.swap-map-stop-num {
+  width: 22px; height: 22px; border-radius: 50%; color: #fff; font-size: 11px; font-weight: 700;
+  display: grid; place-items: center; box-shadow: var(--shadow-2); border: 2px solid #fff;
+}
+.swap-search-bar { padding: 10px 20px; border-bottom: 1px solid var(--border-soft); position: static; }
+.route-truck-icon-btn.danger:hover { background: var(--danger-tint); border-color: var(--danger); color: var(--danger); }
 @media (max-width: 900px) {
   #swapMiniMap { height: 240px; }
 }
