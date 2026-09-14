@@ -489,6 +489,7 @@ button, input, select { font-family: inherit; }
   display: grid; place-items: center; color: var(--primary-2); transition: background .12s, border-color .12s;
 }
 .route-truck-icon-btn:hover { background: var(--accent-tint); border-color: var(--accent); }
+.route-truck-icon-btn:disabled { opacity: .5; cursor: wait; }
 
 :root {
   --lp-ok: #00A85B;

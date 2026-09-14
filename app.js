@@ -445,6 +445,14 @@ const ORS_ENDPOINT = "/api/optimize";
 const TOMTOM_ENDPOINT = "/api/tomtom";
 const MAPBOX_TOKEN = "pk.eyJ1IjoicmliZWlyb21ibHVjYXMiLCJhIjoiY21zejAzOWN2MDUydDJ5cG1pazVrZXVlaiJ9.xK13vXsC1e40NmMCdJhOjA";
 
+// A resposta de erro do TomTom vem como {"detailedError":{"code":...,"message":...}} — NÃO um
+// campo simples "error" (isso só existe na nossa própria função /api/tomtom quando ELA falha
+// antes de chegar no TomTom, ex. erro de rede). Sem checar "detailedError" aqui, o motivo real
+// do erro do TomTom se perdia e a tela só mostrava "HTTP 400" — impossível de debugar.
+function tomtomErrorMessage(data, res) {
+  return data?.detailedError?.message || data?.error || data?.message || `HTTP ${res.status}`;
+}
+
 function groupStores() {
   const groups = new Map(); // "depot|veiculo|zona" -> lista de lojas
   for (const store of state.stores) {
@@ -481,6 +489,9 @@ async function runClustering() {
       } catch (errTomTom) {
         console.warn(`TomTom também indisponível para ${key} (${errTomTom.message}), usando estimativa local.`);
         groupRoutes = clusterGroupLocally(depot, vehicle, stores, zona);
+        // guarda o motivo real da falha em cada rota resultante — a UI mostra isso no lugar do
+        // aviso genérico, pra não esconder o que de fato deu errado na TomTom.
+        groupRoutes.forEach(r => { r.engineError = errTomTom.message; });
       }
     }
     collected.push(...groupRoutes);
@@ -700,12 +711,19 @@ async function optimizeGroupViaTomTom(depot, vehicle, stores, zona) {
       destinations: points.map(p => ({ point: { latitude: p.lat, longitude: p.lng } })),
       options: { departAt: "any", traffic: "historical", ...vehicleSpec },
     };
+    const t0 = performance.now();
     const res = await fetch(TOMTOM_ENDPOINT, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ op: "matrix", payload: matrixPayload }),
     });
     const data = await res.json();
-    if (!res.ok || data.error || !data.data) throw new Error(data.error || `HTTP ${res.status}`);
+    const elapsedMs = Math.round(performance.now() - t0);
+    if (!res.ok || data.error || data.detailedError || !data.data) {
+      const msg = tomtomErrorMessage(data, res);
+      console.error(`[TomTom matrix] FALHA — ${points.length} pontos, HTTP ${res.status}, ${elapsedMs}ms — ${msg}`);
+      throw new Error(msg);
+    }
+    console.log(`[TomTom matrix] OK — ${points.length} pontos, HTTP ${res.status}, ${elapsedMs}ms, ${data.data.length} células retornadas`);
 
     const n = points.length;
     const cost = Array.from({ length: n }, () => new Array(n).fill(Infinity));
@@ -745,24 +763,44 @@ async function buildSingleStopTomTomRoute(depot, vehicle, bin, zona, vehicleSpec
   try {
     return await buildTomTomRouteFromOrder(depot, vehicle, bin, zona, vehicleSpec);
   } catch (e) {
-    return buildRouteLocal(depot, vehicle, bin, zona);
+    const local = buildRouteLocal(depot, vehicle, bin, zona);
+    local.engineError = e.message;
+    return local;
   }
 }
 
+// Chama a TomTom Calculate Route (v1) EXATAMENTE na ordem recebida em `orderedStores` — este
+// endpoint (diferente da Matrix) é um roteador ponto-a-ponto-a-ponto, não um otimizador: ele
+// NUNCA reordena waypoints. Por isso é a função certa tanto pra montar rota nova quanto pro botão
+// "recalcular rota real" de uma rota já existente (usado sem tocar em `route.stores`).
 async function buildTomTomRouteFromOrder(depot, vehicle, orderedStores, zona, vehicleSpec) {
   const waypoints = [
     `${depot.lat},${depot.long}`,
     ...orderedStores.map(s => `${s.lat},${s.lng}`),
     `${depot.lat},${depot.long}`,
   ].join(":");
+  const numPoints = orderedStores.length + 2;
 
-  const res = await fetch(TOMTOM_ENDPOINT, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ op: "route", payload: { waypoints, ...vehicleSpec } }),
-  });
-  const data = await res.json();
-  if (!res.ok || data.error || !data.routes || !data.routes.length) {
-    throw new Error(data.error || `HTTP ${res.status}`);
+  console.log(`[TomTom route] enviando — ${numPoints} pontos (depósito + ${orderedStores.length} loja(s) + retorno), waypoints=${waypoints}, veículo=${JSON.stringify(vehicleSpec)}`);
+
+  const t0 = performance.now();
+  let res, data;
+  try {
+    res = await fetch(TOMTOM_ENDPOINT, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ op: "route", payload: { waypoints, ...vehicleSpec } }),
+    });
+    data = await res.json();
+  } catch (networkErr) {
+    console.error(`[TomTom route] FALHA DE REDE ao chamar ${TOMTOM_ENDPOINT} — ${networkErr.message}`);
+    throw new Error(`Falha de rede ao contatar ${TOMTOM_ENDPOINT}: ${networkErr.message}`);
+  }
+  const elapsedMs = Math.round(performance.now() - t0);
+
+  if (!res.ok || data.error || data.detailedError || !data.routes || !data.routes.length) {
+    const msg = tomtomErrorMessage(data, res);
+    console.error(`[TomTom route] FALHA — ${numPoints} pontos, HTTP ${res.status}, ${elapsedMs}ms — ${msg}`);
+    throw new Error(msg);
   }
 
   const route = data.routes[0];
@@ -785,15 +823,53 @@ async function buildTomTomRouteFromOrder(depot, vehicle, orderedStores, zona, ve
   const geometry = [];
   legs.forEach(leg => (leg.points || []).forEach(p => geometry.push([p.latitude, p.longitude])));
 
+  // HTTP 200 com geometria vazia é falha, não sucesso — nunca deixar o mapa cair silenciosamente
+  // pra linha reta achando que "funcionou" (a rota ficaria marcada "rota real" sem ser real).
+  if (!geometry.length) {
+    console.error(`[TomTom route] FALHA — HTTP 200 mas sem geometria (legs[].points vazio) — ${numPoints} pontos, ${elapsedMs}ms`);
+    throw new Error("TomTom respondeu HTTP 200 mas sem geometria de rota (legs[].points vazio)");
+  }
+
+  console.log(`[TomTom route] OK — ${numPoints} pontos, HTTP ${res.status}, ${elapsedMs}ms, ${geometry.length} pontos de geometria retornados, ${(totalDistanceM / 1000).toFixed(1)}km / ${Math.round(totalDurationSec / 60)}min`);
+
   return {
     depot, vehicle, zona,
     stores: orderedStores,
     engine: "tomtom",
-    geometry: geometry.length ? geometry : null,
+    geometry,
     stepData,
     totalDistanceM,
     totalDurationSec,
   };
+}
+
+// Botão "↻" no card da rota — pega a sequência de lojas JÁ DEFINIDA (`route.stores`, exatamente
+// como está, sem ordenar/otimizar nada aqui) e manda pra TomTom Calculate Route só pra obter a
+// geometria/tempo/distância REAIS daquela sequência. Usado depois que um arrastar-solta ou
+// reordenação manual derruba a rota pra "estimado" (linha reta) — recoloca a geometria real sem
+// nunca mudar a ordem das paradas. Se a TomTom falhar, mostra o erro real — não finge sucesso.
+async function recalcRouteReal(route, btnEl) {
+  if (!route.stores.length) { toast("Rota sem lojas — nada para calcular.", ""); return; }
+  if (btnEl) { btnEl.disabled = true; btnEl.textContent = "…"; }
+  toast(`Recalculando rota real (TomTom) para ${route.code || "rota"}, sequência preservada...`, "");
+  try {
+    const vehicleSpec = tomtomVehicleSpec(route.vehicle);
+    const result = await buildTomTomRouteFromOrder(route.depot, route.vehicle, route.stores, route.zona, vehicleSpec);
+    route.engine = "tomtom";
+    route.geometry = result.geometry;
+    route.stepData = result.stepData;
+    route.totalDistanceM = result.totalDistanceM;
+    route.totalDurationSec = result.totalDurationSec;
+    route.engineError = null;
+    toast(`${route.code || "Rota"}: geometria real recalculada via TomTom (${route.stores.length} loja(s), sequência mantida).`, "success");
+  } catch (e) {
+    route.engineError = e.message;
+    toast(`Falha ao calcular rota real via TomTom: ${e.message}`, "danger");
+  } finally {
+    if (btnEl) { btnEl.disabled = false; btnEl.textContent = "↻"; }
+    computeUsage();
+    renderAll();
+  }
 }
 
 // Mesma ideia do twoOptStops, mas usando índices numa matriz de custo real (TomTom),
@@ -1381,11 +1457,15 @@ function buildRouteCardEl(route, scope) {
     ors: ["ok", "rota real · ORS", "Distância e sequência calculadas pela malha viária real (OpenRouteService)"],
     tomtom: ["ok", "rota real · TomTom", "Distância e sequência calculadas pela malha viária real, com trânsito (TomTom)"],
     unassigned: ["danger", "sem rota", "Não coube em nenhum veículo — mova manualmente"],
-    local: ["warn", "estimado", "APIs indisponíveis — estimativa por linha reta"],
+    // engineError (quando existe) é o motivo REAL retornado pela API que falhou — nunca escondido
+    // atrás do aviso genérico, exatamente pra não mascarar um erro de verdade do TomTom/ORS.
+    local: ["warn", "estimado", route.engineError
+      ? `Rota real falhou, usando estimativa por linha reta. Motivo: ${route.engineError}`
+      : "APIs indisponíveis — estimativa por linha reta"],
     manual: ["", "manual", "Rota criada manualmente — arraste lojas pra cá"],
   };
   const [badgeClass, badgeText, badgeTitle] = engineLabels[route.engine] || engineLabels.local;
-  const engineBadge = `<span class="route-engine ${badgeClass}" title="${badgeTitle}">${badgeText}</span>`;
+  const engineBadge = `<span class="route-engine ${badgeClass}" title="${badgeTitle.replace(/"/g, "&quot;")}">${badgeText}</span>`;
   const maxStops = maxStopsForZone(route.zona);
   const stopCountBadge = `<span class="route-stop-count${route.stores.length > maxStops ? " over" : ""}" title="Limite de paradas configurado pra esta zona: ${maxStops}">${route.stores.length}/${maxStops}</span>`;
   const horarioWarnBadge = route._horarioViolado
@@ -1404,6 +1484,7 @@ function buildRouteCardEl(route, scope) {
         <div class="route-depot">${route.depot.sigla} · ${stopCountBadge} paradas ${engineBadge}${horarioWarnBadge}${transportadoraBadge}</div>
       </div>
       <div class="spacer"></div>
+      <button class="route-truck-icon-btn route-recalc-btn" data-route-id="${route.id}" title="Recalcular rota real pelas ruas (TomTom) SEM alterar a sequência das lojas">↻</button>
       <button class="route-truck-icon-btn truck-view-btn" data-route-id="${route.id}" title="Ver caminhão desta rota">+</button>
       <select class="route-vehicle" title="Trocar o veículo desta rota">
         ${state.config.vehicles.map(v => `<option value="${v.codigo}" ${v.codigo === route.vehicle.codigo ? "selected" : ""}>${v.codigo}</option>`).join("")}
@@ -1452,6 +1533,12 @@ function buildRouteCardEl(route, scope) {
       return;
     }
     openTruckModal(route);
+  });
+
+  const recalcBtn = card.querySelector(".route-recalc-btn");
+  if (recalcBtn) recalcBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    recalcRouteReal(route, recalcBtn);
   });
 
   card.addEventListener("dragover", (e) => { e.preventDefault(); card.classList.add("drag-over"); });

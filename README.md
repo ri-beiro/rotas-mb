@@ -7,15 +7,19 @@ nessa ordem, três caminhos — cada rota individual mostra um selo indicando qu
 1. **OpenRouteService / VROOM** — o melhor caminho (clusteriza, sequencia e calcula tudo
    junto pela malha viária real). Hoje está pronto no código mas **sem chave válida** — veja
    abaixo.
-2. **TomTom** — matriz de distância real + rota considerando trânsito. É o que está ativo
+2. **TomTom** — matriz de distância real (Matrix Routing v2) pra sequenciar as paradas, mais
+   a rota final (Calculate Route v1) pela malha viária real, com trânsito. É o que está ativo
    hoje, com a chave já embutida em `api/tomtom.js`. Roteiriza como **caminhão** (todo veículo
    nosso é um caminhão — 3/4, VUC, Truck ou Carreta, nenhum é tratado como carro), evitando via
    com restrição de caminhão (viaduto baixo, ponte com limite de peso, rua com proibição de
    caminhão etc.) — usa peso total e comprimento/largura/altura de cada veículo, configuráveis
    em Configurações → "Dimensões do veículo" (valores estimados por classe; ajustem pra bater
-   com a frota real — não deu pra testar contra a API de verdade neste ambiente, então vale
-   conferir numa rota real depois de configurar).
-3. **Estimativa local** — linha reta × fator de rota, usada só se as duas APIs falharem.
+   com a frota real). A geometria desenhada no mapa é a resposta real da TomTom (nunca linha
+   reta, interpolação ou desenho manual) — ver detalhes e como testar em
+   "Integração TomTom — rota real pelas ruas" mais abaixo.
+3. **Estimativa local** — linha reta × fator de rota, usada só se as duas APIs falharem. Uma
+   rota nesse estado mostra o selo "estimado" com o motivo real da falha no `title` (passe o
+   mouse) — nunca esconde silenciosamente que a API de rota real não funcionou.
 
 ## Chaves já configuradas
 
@@ -208,6 +212,80 @@ adicionados os dois com o mesmo teste comparativo do item 1.
 acima) gerou 38 rotas — o Paragon, pro mesmo pedido, gerou 41. Antes da consolidação, o mesmo
 pedido teria gerado perto de 100 rotas (é o que um export gerado com uma versão desatualizada
 mostrou) — a melhoria é real, não só de um caso isolado.
+
+## Integração TomTom — rota real pelas ruas
+
+O mapa desenha exatamente a geometria (`legs[].points`) que a **TomTom Calculate Route v1**
+devolve — nunca linha reta entre pontos, interpolação manual ou cálculo geométrico local. Como
+funciona, ponta a ponta:
+
+- **Onde é chamada**: `buildTomTomRouteFromOrder()` em `app.js` monta os waypoints na ordem
+  `CD → loja 1 → loja 2 → ... → loja N → CD` e chama `POST /api/tomtom` (nosso proxy) com
+  `{ op: "route", payload: { waypoints, ...vehicleSpec } }`. `api/tomtom.js` (só ele tem a
+  chave) monta a URL real:
+  `https://api.tomtom.com/routing/1/calculateRoute/{waypoints}/json?key=...&routeType=fastest&traffic=true&travelMode=truck&routeRepresentation=polyline&vehicleCommercial=true&vehicleWeight=...&vehicleLength=...&vehicleWidth=...&vehicleHeight=...`
+  e repassa a resposta (status e corpo) direto pro frontend.
+- **A ordem das paradas nunca é alterada por essa chamada**: Calculate Route é um roteador
+  ponto-a-ponto-a-ponto, não um otimizador — ele calcula o caminho exatamente na sequência
+  enviada. Quem decide a sequência (nearest-neighbor + 2-opt na roteirização automática, ou
+  você arrastando/usando as setas de reordenar numa rota já existente) roda **antes**; essa
+  função só pega a ordem já pronta e busca a geometria real dela.
+- **Parâmetros de caminhão enviados** (todos suportados oficialmente pela Calculate Route API):
+  `travelMode=truck`, `vehicleCommercial=true`, `vehicleWeight` (kg, peso bruto total),
+  `vehicleLength`/`vehicleWidth`/`vehicleHeight` (metros) — lidos de cada veículo em
+  `depots.js`/Configurações (`comprimento`, `largura`, `altura`, `pesoTotalKg`). Centralizado
+  por classe de veículo (3/4, VUC, Truck, Carreta com valores próprios, já que a frota tem 4
+  perfis de caminhão bem diferentes) em vez de 4 constantes globais únicas — um só lugar por
+  veículo, editável em Configurações, sem valor espalhado pelo resto do código.
+- **Nenhum fallback esconde erro**: se a TomTom responder com erro (`detailedError`), com HTTP
+  diferente de 2xx, ou até com HTTP 200 mas sem nenhum ponto de geometria (`legs[].points`
+  vazio — tratado como falha, não como sucesso), a função lança uma exceção com a mensagem
+  real da TomTom. Isso propaga pro selo da rota ("estimado", com o motivo real no tooltip) ou,
+  no botão de recalcular (abaixo), vira um toast vermelho com o erro — nunca uma linha reta
+  desenhada por baixo do selo "rota real".
+- **Recalcular rota real sem reordenar**: cada card de rota tem um botão **↻** (ao lado do
+  "Ver caminhão") — "Recalcular rota real pelas ruas (TomTom)". Ele pega `route.stores`
+  **exatamente como está** (útil depois de mover/reordenar uma loja manualmente, o que derruba
+  o selo pra "estimado") e busca só a geometria/distância/tempo reais daquela sequência, sem
+  rodar nenhum otimizador.
+- **Logs de diagnóstico** (nunca incluem a API key):
+  - Frontend (console do navegador): `[TomTom route] enviando — N pontos, waypoints=..., veículo={...}`
+    antes da chamada, e depois `[TomTom route] OK — N pontos, HTTP 200, XXXms, Y pontos de
+    geometria retornados, Zkm/Wmin` ou `[TomTom route] FALHA — ... — <mensagem real da TomTom>`.
+  - Servidor (`api/tomtom.js`, aparece no log da função na Vercel): `[api/tomtom] -> op=route
+    pontos=N url=...&key=***...` (URL com a key sempre mascarada) antes da chamada, e
+    `[api/tomtom] <- op=route HTTP 200 em XXXms geometria=Ypts` ou, em erro,
+    `[api/tomtom] <- op=route FALHA HTTP ### em XXXms — resposta TomTom: {...}` com o corpo de
+    erro real da TomTom.
+- **A API key nunca chega ao navegador**: o frontend só conhece a URL relativa `/api/tomtom`;
+  a chave (`TOMTOM_API_KEY` como variável de ambiente, com fallback pra uma chave embutida em
+  `api/tomtom.js`) só existe no código que roda no servidor (função serverless da Vercel).
+
+**Teste que rodei** (não deu pra chamar `api.tomtom.com` de verdade a partir deste ambiente de
+desenvolvimento — a política de rede daqui bloqueia esse domínio especificamente, confirmado com
+`curl` retornando `403` na tentativa de conexão; não é algo que eu consiga contornar por
+software, é um bloqueio de rede do ambiente). Testei tudo o que dava pra testar sem a chamada de
+rede real, simulando as respostas da TomTom (sucesso com geometria, erro `detailedError`, HTTP
+200 sem geometria, falha de rede) com uma rota de teste (CD + 4 lojas) via Playwright + mock de
+`/api/tomtom`, e confirmei:
+1. ✅ A chamada é montada corretamente (waypoints na ordem certa, parâmetros de veículo certos).
+2. ✅ Uma resposta 200 com geometria é aceita e os pontos viram a linha desenhada no mapa.
+3. ✅ A ordem das paradas enviada é sempre exatamente `route.stores` no momento da chamada —
+   nunca reordenada por essa função, inclusive depois de reordenar manualmente e clicar ↻.
+4. ✅ Um erro real da TomTom (`detailedError.message`) aparece de verdade (antes só mostrava
+   "HTTP 400" genérico) — testado tanto na chamada automática quanto no botão ↻.
+5. ✅ HTTP 200 com `legs[].points` vazio agora é tratado como falha (antes "sucedia" com
+   `geometry: null`, badge dizendo "rota real" sem ter rota nenhuma desenhada).
+6. ✅ Nenhuma linha do console do navegador contém a API key.
+7. ✅ `api/tomtom.js` mascara a key em todo log (`key=***`), tanto no sucesso quanto no erro.
+
+**O que só dá pra confirmar com a chave e a rede reais** (ou seja, no seu deploy Vercel, ou
+localmente se sua rede não bloquear `api.tomtom.com`): que a TomTom realmente devolve HTTP 200 e
+geometria válida pra coordenadas reais da sua operação, e que a linha desenhada acompanha as
+ruas visualmente (não só estruturalmente). Depois de importar um pedido e clicar em "Reagrupar"
+(ou no botão ↻ de uma rota existente), abra o console do navegador (F12) — as linhas
+`[TomTom route] OK — ...` ou `[TomTom route] FALHA — ...` mostram exatamente o que aconteceu; se
+quiser, me mande essas linhas (sem a key, elas nunca a incluem) que eu ajudo a interpretar.
 
 ## Base de depósitos (CDs)
 
