@@ -2410,6 +2410,16 @@ function fmtMinAsHHMM(min) {
 function exportCsv() {
   if (!state.routes.length) return;
 
+  // Loja em Encaixes (SA) não pertence a nenhuma rota — o export só percorre state.routes, então
+  // exportar com o painel de Encaixes não-vazio geraria um CSV faltando pedido(s) de verdade, sem
+  // aviso nenhum. Já aconteceu num pedido real: 2 lojas ficaram nos Encaixes e não foram pro CSV
+  // final enquanto o Paragon (feito manualmente) tinha incluído as duas numa rota.
+  if ((state.saStores || []).length) {
+    const nomes = state.saStores.map(s => s.codigo).join(", ");
+    toast(`Existe(m) ${state.saStores.length} loja(s) em Encaixes (SA) sem rota ainda (${nomes}) — arraste pra uma rota antes de exportar, senão elas não vão pro arquivo.`, "danger");
+    return;
+  }
+
   const semNome = state.routes.filter(r => r.stores.length && !(r.code || "").trim());
   if (semNome.length) {
     toast(`Renomeie antes de exportar: rota(s) sem nome com carga (clique no nome da rota na lista).`, "danger");

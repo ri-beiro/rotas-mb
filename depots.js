@@ -91,15 +91,18 @@ const DEFAULT_ZONE_MAX_STOPS = { MG: 7 };
 
 // Transportadora padrão por zona — de "planilha_status_rotas.xlsx" (só informativo: aparece no
 // card da rota e no export: cada zona só é atendida por uma transportadora específica). SP/LN/
-// LT/VP (frota própria "MBR" = Martin Brower) e CP ("YES") confirmados num pedido real da região
-// de CDGR — a planilha original não cobria essas zonas.
+// LT/VP (frota própria "MBR" = Martin Brower), CP/SO/PC ("YES") e SM/RP/SJ (confirma SGT/PRODELOG
+// já cadastrados) confirmados comparando um pedido real da região de CDGR com o resultado do
+// Paragon pro mesmo pedido — a planilha original não cobria as zonas do cross-dock de Jundiaí
+// (CP/NT/SO/PC). NT ainda não apareceu em nenhum pedido real comparado — se aparecer com
+// transportadora diferente de YES, ajustar aqui.
 const DEFAULT_ZONE_TRANSPORTADORA = {
   BA: "PRODELOG", MG: "PRODELOG", BS: "PRODELOG", IG: "PRODELOG",
   RJ: "LOGMAN", SF: "LOGMAN", ES: "LOGMAN", JF: "LOGMAN", NF: "LOGMAN", SR: "LOGMAN",
   DF: "SGT", GO: "SGT", MT: "SGT", TO: "SGT", ML: "SGT",
   GS: "SGT", RO: "PRODELOG", SM: "PRODELOG", AC: "PRODELOG",
   MS: "SGT", TM: "SGT", NO: "SGT", MD: "SGT", RP: "SGT", SJ: "SGT",
-  SP: "MBR", LN: "MBR", LT: "MBR", VP: "MBR", CP: "YES",
+  SP: "MBR", LN: "MBR", LT: "MBR", VP: "MBR", CP: "YES", SO: "YES", PC: "YES",
 };
 
 // Exceções de cross-dock: zona que deve ser atendida por um depósito diferente do que o JDE

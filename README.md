@@ -228,6 +228,32 @@ acima) gerou 38 rotas — o Paragon, pro mesmo pedido, gerou 41. Antes da consol
 pedido teria gerado perto de 100 rotas (é o que um export gerado com uma versão desatualizada
 mostrou) — a melhoria é real, não só de um caso isolado.
 
+**Validação com um terceiro pedido real** (CDGR, 242 lojas — mesmo arquivo de entrada usado
+tanto pelo sistema quanto pela pessoa que roteirizou manualmente no Paragon, o que permite
+comparar as duas saídas ponto a ponto): o sistema gerou 34 rotas contra 37 do Paragon, com
+depósito 100% igual em todas as 240 lojas roteirizadas por ele — mas essa comparação revelou
+dois problemas reais, corrigidos:
+1. **Transportadora não cadastrada para as zonas do cross-dock de Jundiaí** — `SO` e `PC`
+   caíam no código de veículo simples (`3/4` em vez de `YES-3/4-GR`) porque só `CP` estava
+   cadastrada como `YES` nessas 4 zonas (a quarta, `NT`, não apareceu neste pedido — se
+   aparecer com transportadora diferente de `YES` num pedido futuro, ajustar a tabela).
+2. **Exportar com lojas em "Encaixes (SA)" pendentes gerava um CSV incompleto, sem avisar
+   nada**: 2 lojas desse pedido não tinham pré-rota (`CALL.TEXT01` vazio) e foram
+   corretamente paradas nos Encaixes — mas o botão "Exportar" só percorre `state.routes`, e
+   sem checar os Encaixes o arquivo final sairia faltando 2 pedidos reais de cliente, sem
+   nenhum aviso na tela (o Paragon, feito manualmente, incluiu as duas). Agora exportar com
+   Encaixes pendente é bloqueado, com o nome de cada loja pendente na mensagem.
+
+Uma terceira diferença ficou identificada mas **não corrigida ainda, de propósito**: em 11
+lojas de SO/PC, o Paragon consolidou um grupo delas num Truck só, enquanto o sistema manteve
+vários "3/4" separados (mesmas lojas, mesmo depósito, veículo diferente). O motor de hoje
+fixa o veículo por zona (uma tabela zona → veículo só) e nunca tenta "promover" pra um veículo
+maior quando várias rotas pequenas caberiam consolidadas — diferente do bin-packing por
+capacidade que já existe (que só junta rotas do MESMO veículo). Dá pra corrigir manualmente
+route por rota (dropdown de veículo no card), do jeito que a pessoa fez no Paragon; automatizar
+isso (o motor testar mais de um veículo por zona e escolher o que gerar menos rotas) é uma
+mudança de algoritmo maior — perguntem antes se quiserem que eu implemente isso agora ou não.
+
 ## Integração TomTom — rota real pelas ruas
 
 O mapa desenha exatamente a geometria (`legs[].points`) que a **TomTom Calculate Route v1**
