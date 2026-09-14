@@ -551,6 +551,8 @@ async function runClustering() {
   } else {
     toast("Rotas calculadas.", "success");
   }
+
+  checkVehicleConsolidationOpportunities();
 }
 
 function setBusy(isBusy) {
@@ -1033,6 +1035,131 @@ function buildRouteLocal(depot, vehicle, stores, zona) {
   }
   const improved = enforceWindowOrder(twoOptStops(depot, ordered, (a, b) => haversineKm(a.lat, a.lng, b.lat, b.lng)));
   return { depot, vehicle, zona, stores: improved, engine: "local", geometry: null, stepData: [] };
+}
+
+/* ---- Sugestão (não-automática) de consolidar rotas pequenas num veículo maior ---- */
+function routeTotals(route) {
+  return {
+    m3: route.stores.reduce((a, s) => a + s.m3, 0),
+    kg: route.stores.reduce((a, s) => a + s.peso, 0),
+  };
+}
+
+// Depois que o motor já roteirizou tudo (cada zona com o veículo padrão dela), verifica se
+// existe alguma zona/depósito com MAIS DE UMA rota do mesmo veículo que, juntas, caberiam num
+// veículo maior do cadastro em MENOS rotas — exatamente o tipo de consolidação que um operador
+// humano faz na hora (comparado num pedido real, o Paragon juntou um grupo de lojas de SO/PC
+// num Truck só, enquanto o motor manteve várias rotas 3/4 separadas, mesma zona). NUNCA aplica
+// sozinho — só detecta e devolve a lista de oportunidades pra mostrar num popup de confirmação.
+function findVehicleConsolidationOpportunities() {
+  const groups = new Map();
+  state.routes.forEach(r => {
+    if (!r.stores.length || r.engine === "unassigned" || r.engine === "manual") return;
+    const key = r.depot.sigla + "|" + r.zona + "|" + r.vehicle.codigo;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  });
+
+  const opportunities = [];
+  groups.forEach(routes => {
+    if (routes.length < 2) return;
+    const currentVehicle = routes[0].vehicle;
+    const depot = routes[0].depot;
+    const zona = routes[0].zona;
+    const allStores = routes.flatMap(r => r.stores);
+
+    let best = null;
+    state.config.vehicles.forEach(candidate => {
+      if (candidate.codigo === currentVehicle.codigo) return;
+      const maior = candidate.m3 > currentVehicle.m3 && candidate.kg > currentVehicle.kg;
+      if (!maior) return;
+      const newRoutes = clusterGroupLocally(depot, candidate, allStores, zona);
+      const reduzOk = newRoutes.length > 0 && newRoutes.length < routes.length;
+      if (reduzOk && (!best || newRoutes.length < best.newRoutes.length ||
+          (newRoutes.length === best.newRoutes.length && candidate.m3 < best.candidate.m3))) {
+        best = { candidate, newRoutes };
+      }
+    });
+    if (best) {
+      opportunities.push({
+        depot, zona, currentVehicle,
+        currentRoutes: routes,
+        candidate: best.candidate,
+        newRoutes: best.newRoutes,
+      });
+    }
+  });
+  return opportunities;
+}
+
+let vehicleSuggestions = [];
+
+function checkVehicleConsolidationOpportunities() {
+  vehicleSuggestions = findVehicleConsolidationOpportunities();
+  if (!vehicleSuggestions.length) return;
+  renderVehicleSuggestModal();
+  document.getElementById("vehSuggestModal").classList.add("show");
+}
+
+function renderVehicleSuggestModal() {
+  const list = document.getElementById("vehSuggestList");
+  list.innerHTML = "";
+  vehicleSuggestions.forEach((opp, idx) => {
+    const card = document.createElement("div");
+    card.className = "vehsug-card";
+    const currentHtml = opp.currentRoutes.map(r =>
+      `<div class="vehsug-route">${r.code || r.id} — ${r.stores.length} parada${r.stores.length === 1 ? "" : "s"} · ${fmtNum(r.m3)} m³ · ${fmtNum(r.kg, 0)} kg</div>`
+    ).join("");
+    const proposedHtml = opp.newRoutes.map((r, i) => {
+      const t = routeTotals(r);
+      return `<div class="vehsug-route proposed">Nova rota ${i + 1} — ${r.stores.length} parada${r.stores.length === 1 ? "" : "s"} · ${fmtNum(t.m3)} m³ · ${fmtNum(t.kg, 0)} kg</div>`;
+    }).join("");
+    card.innerHTML = `
+      <div class="vehsug-head">Zona ${opp.zona || "—"} · ${opp.depot.sigla}</div>
+      <div class="vehsug-compare">
+        <div>
+          <div class="vehsug-col-title">Hoje — ${opp.currentRoutes.length} rotas · ${opp.currentVehicle.codigo}</div>
+          ${currentHtml}
+        </div>
+        <div class="vehsug-arrow">→</div>
+        <div>
+          <div class="vehsug-col-title">Sugestão — ${opp.newRoutes.length} rota${opp.newRoutes.length === 1 ? "" : "s"} · ${opp.candidate.codigo}</div>
+          ${proposedHtml}
+        </div>
+      </div>
+      <div class="vehsug-actions">
+        <button class="btn btn-line btn-sm vehsug-ignore" data-idx="${idx}">Ignorar</button>
+        <button class="btn btn-sm vehsug-apply" data-idx="${idx}">Aplicar</button>
+      </div>
+    `;
+    list.appendChild(card);
+  });
+}
+
+function applyVehicleSuggestion(idx) {
+  const opp = vehicleSuggestions[idx];
+  if (!opp) return;
+  opp.currentRoutes.forEach(r => {
+    const i = state.routes.indexOf(r);
+    if (i !== -1) state.routes.splice(i, 1);
+  });
+  opp.newRoutes.forEach((r, i) => {
+    r.id = "r_veh_" + Date.now() + "_" + i;
+    r.code = i === 0 ? (opp.currentRoutes[0].code || "") : `${opp.currentRoutes[0].code || ""} (${i + 1})`;
+  });
+  state.routes.push(...opp.newRoutes);
+  vehicleSuggestions.splice(idx, 1);
+  computeUsage();
+  renderAll();
+  toast(`Consolidado em ${opp.newRoutes.length} rota${opp.newRoutes.length === 1 ? "" : "s"} de ${opp.candidate.codigo}.`, "success");
+  if (vehicleSuggestions.length) renderVehicleSuggestModal();
+  else document.getElementById("vehSuggestModal").classList.remove("show");
+}
+
+function dismissVehicleSuggestion(idx) {
+  vehicleSuggestions.splice(idx, 1);
+  if (vehicleSuggestions.length) renderVehicleSuggestModal();
+  else document.getElementById("vehSuggestModal").classList.remove("show");
 }
 
 // Melhoria de rota clássica (2-opt): desfaz cruzamentos/zigue-zague testando inverter
@@ -2523,6 +2650,20 @@ function wireEvents() {
     if (e.target.id === "swapModal") document.getElementById("swapModal").classList.remove("show");
   });
   document.getElementById("swapSearch").addEventListener("input", renderSwapModal);
+
+  document.getElementById("vehSuggestClose").addEventListener("click", () => {
+    document.getElementById("vehSuggestModal").classList.remove("show");
+  });
+  document.getElementById("vehSuggestModal").addEventListener("click", (e) => {
+    if (e.target.id === "vehSuggestModal") document.getElementById("vehSuggestModal").classList.remove("show");
+  });
+  document.getElementById("vehSuggestList").addEventListener("click", (e) => {
+    const applyBtn = e.target.closest(".vehsug-apply");
+    if (applyBtn) { applyVehicleSuggestion(parseInt(applyBtn.dataset.idx, 10)); return; }
+    const ignoreBtn = e.target.closest(".vehsug-ignore");
+    if (ignoreBtn) { dismissVehicleSuggestion(parseInt(ignoreBtn.dataset.idx, 10)); return; }
+  });
+
   document.getElementById("swapToggleMap").addEventListener("click", (e) => {
     const area = document.getElementById("swapMapArea");
     const collapsed = area.classList.toggle("collapsed");

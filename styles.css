@@ -355,13 +355,25 @@ button, input, select { font-family: inherit; }
 .stop-cam-detail .btn-sm { padding: 4px 9px; font-size: 11px; }
 
 /* ---------- Modal genérico (config / gerenciar rotas) ---------- */
-.config-modal, .swap-modal {
+.config-modal, .swap-modal, .vehsug-modal {
   background: var(--surface); border-radius: 10px; box-shadow: var(--shadow-2);
   width: 100%; max-width: 720px; max-height: 88vh; padding: 0; overflow: hidden;
   border: 1px solid var(--border); display: flex; flex-direction: column;
 }
 .config-modal-body { overflow-y: auto; }
 .swap-modal { max-width: 1280px; height: 92vh; max-height: 92vh; }
+
+.vehsug-modal { max-width: 780px; }
+.vehsug-intro { padding: 12px 20px; font-size: 12.5px; color: var(--ink-soft); line-height: 1.5; border-bottom: 1px solid var(--border-soft); }
+#vehSuggestList { overflow-y: auto; padding: 14px 20px 20px; display: flex; flex-direction: column; gap: 14px; }
+.vehsug-card { border: 1px solid var(--border); border-radius: var(--radius-md); padding: 12px 14px; background: var(--surface-2); }
+.vehsug-head { font-weight: 700; font-size: 13px; margin-bottom: 10px; }
+.vehsug-compare { display: grid; grid-template-columns: 1fr auto 1fr; gap: 10px; align-items: start; }
+.vehsug-arrow { font-size: 18px; color: var(--ink-faint); padding-top: 20px; }
+.vehsug-col-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .03em; color: var(--ink-faint); margin-bottom: 6px; }
+.vehsug-route { font-size: 12.5px; padding: 5px 8px; border-radius: 6px; background: var(--surface); border: 1px solid var(--border-soft); margin-bottom: 5px; }
+.vehsug-route.proposed { background: var(--success-tint); border-color: var(--success); }
+.vehsug-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 .swap-modal-body {
   display: grid; grid-template-columns: 1fr 1fr; gap: 0; overflow: hidden; flex: 1; min-height: 0;
 }

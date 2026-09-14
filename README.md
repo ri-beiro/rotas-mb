@@ -244,15 +244,25 @@ dois problemas reais, corrigidos:
    nenhum aviso na tela (o Paragon, feito manualmente, incluiu as duas). Agora exportar com
    Encaixes pendente é bloqueado, com o nome de cada loja pendente na mensagem.
 
-Uma terceira diferença ficou identificada mas **não corrigida ainda, de propósito**: em 11
-lojas de SO/PC, o Paragon consolidou um grupo delas num Truck só, enquanto o sistema manteve
-vários "3/4" separados (mesmas lojas, mesmo depósito, veículo diferente). O motor de hoje
-fixa o veículo por zona (uma tabela zona → veículo só) e nunca tenta "promover" pra um veículo
-maior quando várias rotas pequenas caberiam consolidadas — diferente do bin-packing por
-capacidade que já existe (que só junta rotas do MESMO veículo). Dá pra corrigir manualmente
-route por rota (dropdown de veículo no card), do jeito que a pessoa fez no Paragon; automatizar
-isso (o motor testar mais de um veículo por zona e escolher o que gerar menos rotas) é uma
-mudança de algoritmo maior — perguntem antes se quiserem que eu implemente isso agora ou não.
+Uma terceira diferença apareceu na mesma comparação: em 11 lojas de SO/PC, o Paragon consolidou
+um grupo delas num Truck só, enquanto o sistema manteve vários "3/4" separados (mesmas lojas,
+mesmo depósito, veículo diferente) — porque o motor fixa o veículo por zona (uma tabela zona →
+veículo só) e nunca tenta sozinho "promover" pra um veículo maior quando várias rotas pequenas
+caberiam consolidadas.
+
+## Sugestão de consolidar veículo (nunca automática)
+
+Em vez de o motor decidir isso sozinho, depois de cada "Reagrupar" ele verifica se alguma
+zona/depósito ficou com **mais de uma rota do mesmo veículo** que, juntas, caberiam num veículo
+maior do seu cadastro em **menos rotas** (testa cada outro veículo com M³ e KG maiores, usando o
+mesmo bin-packing por capacidade já existente, e fica com a opção que reduzir mais o número de
+rotas). Se achar alguma, abre um popup — **"Sugestão: juntar rotas num veículo maior?"** — com
+cada oportunidade lado a lado: as rotas de hoje (código, paradas, m³, kg) à esquerda, a proposta
+(quantas rotas novas, com quantas paradas/m³/kg cada) à direita. Nada é aplicado sozinho: só
+depois de clicar **"Aplicar"** — em cada oportunidade separadamente — as rotas antigas somem e
+a(s) nova(s) entra(m) no lugar (você pode nomear/reordenar/mover lojas normalmente depois,
+igual qualquer outra rota); "Ignorar" descarta só aquela sugestão e mantém as rotas como estão.
+Fechar o popup sem clicar em nada não muda nada.
 
 ## Integração TomTom — rota real pelas ruas
 
