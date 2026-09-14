@@ -8,7 +8,13 @@ nessa ordem, três caminhos — cada rota individual mostra um selo indicando qu
    junto pela malha viária real). Hoje está pronto no código mas **sem chave válida** — veja
    abaixo.
 2. **TomTom** — matriz de distância real + rota considerando trânsito. É o que está ativo
-   hoje, com a chave já embutida em `api/tomtom.js`.
+   hoje, com a chave já embutida em `api/tomtom.js`. Roteiriza como **caminhão** (todo veículo
+   nosso é um caminhão — 3/4, VUC, Truck ou Carreta, nenhum é tratado como carro), evitando via
+   com restrição de caminhão (viaduto baixo, ponte com limite de peso, rua com proibição de
+   caminhão etc.) — usa peso total e comprimento/largura/altura de cada veículo, configuráveis
+   em Configurações → "Dimensões do veículo" (valores estimados por classe; ajustem pra bater
+   com a frota real — não deu pra testar contra a API de verdade neste ambiente, então vale
+   conferir numa rota real depois de configurar).
 3. **Estimativa local** — linha reta × fator de rota, usada só se as duas APIs falharem.
 
 ## Chaves já configuradas
@@ -56,8 +62,11 @@ com a estimativa local, já que as funções serverless não existem fora de um 
    rotas lado a lado (cada uma expande/seleciona independente da outra) com mais espaço pra
    arrastar entre rotas distantes na lista, um mapa das rotas em cima (clique numa linha — no
    mapa ou no card da rota, em qualquer coluna — pra destacar ela por cima das outras; dá pra
-   destacar uma rota de cada coluna ao mesmo tempo), e os Encaixes (SA) também aparecem ali
-   (clique numa loja de encaixe pra ver ela marcada no mapa e comparar com as rotas destacadas).
+   destacar uma rota de cada coluna ao mesmo tempo; o botão "▲ Ocultar mapa" recolhe mapa +
+   Encaixes pra sobrar mais espaço pra lista quando não precisar do mapa), e os Encaixes (SA)
+   também aparecem ali (clique numa loja de encaixe pra ver ela marcada no mapa e comparar com
+   as rotas destacadas). As setinhas ▲▼ ao lado de cada loja mudam a ordem de entrega dentro da
+   mesma rota (também volta pra estimativa local, pelo mesmo motivo do arrastar entre rotas).
 4. Clique em "Exportar para o JDE" para gerar o CSV de retorno.
 
 ## Horário de entrega da loja (Call.ORDDETS1)

@@ -107,6 +107,15 @@
         </div>
 
         <div class="config-section">
+          <h4>Dimensões do veículo (roteirização por rua real)</h4>
+          <p class="hint">Usadas na chamada do TomTom pra rota evitar via com restrição de caminhão (viaduto baixo, ponte com limite de peso, rua com proibição de caminhão etc.) — sem isso a rota seria calculada como se fosse carro. Peso total é o peso bruto do veículo (PBT/GVW — o veículo vazio + a carga), não só a carga. Valores estimados por classe — ajustem pra bater com a frota real.</p>
+          <table class="cfg-table" id="tblVehicleDims">
+            <thead><tr><th>Veículo</th><th>Peso total (kg)</th><th>Compr. (m)</th><th>Larg. (m)</th><th>Alt. (m)</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+
+        <div class="config-section">
           <h4>Depósito padrão por zona</h4>
           <p class="hint">Usado apenas como reserva — na prática o motor prioriza o depósito de origem que o próprio JDE já traz no arquivo (CALL.DEPOTID).</p>
           <table class="cfg-table" id="tblZoneDepot">
@@ -174,17 +183,22 @@
       <div class="modal-card swap-modal">
         <div class="lp-head">
           <div class="lp-title">Trocar lojas entre rotas</div>
-          <button class="btn btn-line btn-sm" id="swapModalClose">Fechar ✕</button>
-        </div>
-        <div class="swap-map-wrap">
-          <div id="swapMiniMap"></div>
-        </div>
-        <div class="sa-panel" id="swapSaStrip" style="display:none">
-          <div class="sa-panel-head">
-            <span>📦 Encaixes (SA) <span class="sa-count" id="swapSaCount">0</span></span>
-            <span class="hint" style="margin:0">Arraste pra qualquer rota das colunas abaixo — clique pra ver no mapa</span>
+          <div class="lp-head-right">
+            <button class="btn btn-line btn-sm" id="swapToggleMap">▲ Ocultar mapa</button>
+            <button class="btn btn-line btn-sm" id="swapModalClose">Fechar ✕</button>
           </div>
-          <div class="route-stops swap-sa-list" id="swapSaList"></div>
+        </div>
+        <div id="swapMapArea">
+          <div class="swap-map-wrap">
+            <div id="swapMiniMap"></div>
+          </div>
+          <div class="sa-panel" id="swapSaStrip" style="display:none">
+            <div class="sa-panel-head">
+              <span>📦 Encaixes (SA) <span class="sa-count" id="swapSaCount">0</span></span>
+              <span class="hint" style="margin:0">Arraste pra qualquer rota das colunas abaixo — clique pra ver no mapa</span>
+            </div>
+            <div class="route-stops swap-sa-list" id="swapSaList"></div>
+          </div>
         </div>
         <div class="swap-modal-body">
           <div class="swap-col">

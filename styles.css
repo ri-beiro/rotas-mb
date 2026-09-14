@@ -286,6 +286,13 @@ button, input, select { font-family: inherit; }
   font-family: var(--font-mono); color: var(--ink-faint); font-size: 10.5px;
   width: 14px; text-align: right; flex-shrink: 0;
 }
+.stop-reorder { display: flex; flex-direction: column; flex-shrink: 0; }
+.stop-reorder-btn {
+  border: none; background: none; padding: 0; margin: 0; line-height: 9px;
+  font-size: 8px; color: var(--ink-faint); cursor: pointer;
+}
+.stop-reorder-btn:hover:not(:disabled) { color: var(--primary-2); }
+.stop-reorder-btn:disabled { opacity: 0.25; cursor: default; }
 .stop-name { font-weight: 600; flex: 1; }
 .stop-city { color: var(--ink-faint); font-size: 11px; }
 .stop-metric { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-soft); }
@@ -362,9 +369,11 @@ button, input, select { font-family: inherit; }
 .swap-col:first-child { border-right: 1px solid var(--border); }
 .swap-col-title { font-size: 11px; font-weight: 700; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.04em; padding: 4px 4px 10px; }
 
+#swapMapArea { flex-shrink: 0; }
+#swapMapArea.collapsed { display: none; }
 .swap-map-wrap { flex-shrink: 0; border-bottom: 1px solid var(--border); background: #dfe6ea; }
-#swapMiniMap { height: 380px; width: 100%; }
-.swap-sa-list { max-height: 130px; overflow-y: auto; }
+#swapMiniMap { height: 260px; width: 100%; }
+.swap-sa-list { max-height: 90px; overflow-y: auto; }
 .sa-map-marker {
   width: 28px; height: 28px; border-radius: 50%; background: var(--warning); color: #fff;
   display: grid; place-items: center; font-size: 15px; box-shadow: 0 0 0 3px rgba(180,121,15,0.3), var(--shadow-2);

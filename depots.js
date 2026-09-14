@@ -36,17 +36,26 @@ const DEFAULT_DEPOTS = [
 // VUC = 7, Truck = 16, Carreta = 28. Além de M³/KG, cada veículo tem limite de posições de
 // palete — total e por câmara (congelado/resfriado/seco). O motor respeita os dois limites ao
 // mesmo tempo: o que estourar primeiro define quando fecha a rota.
+// comprimento/largura/altura (m) e pesoTotalKg (peso bruto total — PBT/GVW, veículo + carga, não
+// só a carga) são usados na roteirização por rua real (TomTom) pra evitar via com restrição de
+// caminhão (viaduto baixo, ponte com limite de peso, rua com proibição de caminhão etc.).
+// São ESTIMATIVAS por classe de veículo comum no Brasil — ajustem pra bater com a frota real na
+// tela de Configurações (o motor manda esses valores pra API a cada roteirização).
 const DEFAULT_VEHICLES = [
   { codigo: "3/4", nome: "3/4 (padrão)", m3: 10.0, kg: 4000, longaDistancia: false,
-    palletTotal: 8, palletCongelado: 4, palletResfriado: 2, palletSeco: 4 },
+    palletTotal: 8, palletCongelado: 4, palletResfriado: 2, palletSeco: 4,
+    comprimento: 7.0, largura: 2.2, altura: 2.8, pesoTotalKg: 8000 },
   { codigo: "VUC", nome: "VUC", m3: 8.5, kg: 4000, longaDistancia: false,
-    palletTotal: 7, palletCongelado: 2, palletResfriado: 2, palletSeco: 3 },
+    palletTotal: 7, palletCongelado: 2, palletResfriado: 2, palletSeco: 3,
+    comprimento: 6.3, largura: 2.2, altura: 2.5, pesoTotalKg: 6000 },
   { codigo: "TRUCK", nome: "Truck (viagem/direta)", m3: 20.0, kg: 8000, longaDistancia: true,
-    palletTotal: 16, palletCongelado: 8, palletResfriado: 4, palletSeco: 8 },
+    palletTotal: 16, palletCongelado: 8, palletResfriado: 4, palletSeco: 8,
+    comprimento: 9.5, largura: 2.6, altura: 3.2, pesoTotalKg: 16000 },
   // Capacidade de palete confirmada (28) na planilha oficial — m³/kg e a divisão por câmara não
   // vêm na planilha, estimados por proporção ao Truck (28/16 = 1.75x). Ajustar se tiverem o dado real.
   { codigo: "CARRETA", nome: "Carreta (rota direta longa)", m3: 35.0, kg: 14000, longaDistancia: true,
-    palletTotal: 28, palletCongelado: 14, palletResfriado: 7, palletSeco: 14 },
+    palletTotal: 28, palletCongelado: 14, palletResfriado: 7, palletSeco: 14,
+    comprimento: 18.6, largura: 2.6, altura: 4.2, pesoTotalKg: 45000 },
 ];
 
 // Regra padrão: depósito por ZONA logística do pedido (CALL.TDATA15 no arquivo do JDE).

@@ -62,6 +62,13 @@ function loadConfig() {
       ZONE_KEYED_CONFIG_FIELDS.forEach(key => {
         merged[key] = { ...defaults[key], ...(saved[key] || {}) };
       });
+      // Preenche dimensões novas (peso total/comprimento/largura/altura) em quem já tinha
+      // veículos salvos de antes dessas colunas existirem — sem isso a rota por rua real do
+      // TomTom ficaria sem esses dados pra quem já configurou os veículos.
+      merged.vehicles = (merged.vehicles || []).map(v => {
+        const def = DEFAULT_VEHICLES.find(d => d.codigo === v.codigo);
+        return def ? { pesoTotalKg: def.pesoTotalKg, comprimento: def.comprimento, largura: def.largura, altura: def.altura, ...v } : v;
+      });
       return merged;
     }
   } catch (e) {}
@@ -519,7 +526,8 @@ function setBusy(isBusy) {
 /* ---- Caminho 1: OpenRouteService / VROOM (rotas reais) ---- */
 async function optimizeGroupViaORS(depot, vehicle, stores, zona) {
   const vehicleCount = estimateVehicleCount(vehicle, stores, zona);
-  const profile = vehicle.codigo === "TRUCK" ? "driving-hgv" : "driving-car";
+  // Todos os nossos veículos (3/4, VUC, Truck, Carreta) são caminhões — nenhum usa perfil "car".
+  const profile = "driving-hgv";
   const serviceSec = Math.round((state.config.stopMin || 20) * 60);
 
   // Mesma linha do tempo usada no timeline de exportação (buildTimeline): carregamento + preparo
@@ -652,9 +660,22 @@ function decodePolyline(encoded, precision = 5) {
   return coords;
 }
 
+// Parâmetros de veículo comercial pra API do TomTom fazer roteirização "certinha pelas ruas"
+// pra caminhão de verdade — evita via com restrição (viaduto baixo, ponte com limite de peso,
+// rua com proibição de caminhão etc.) em vez de tratar a entrega como se fosse um carro. Todos
+// os nossos veículos (3/4, VUC, Truck, Carreta) são caminhões — nenhum usa perfil "car".
+function tomtomVehicleSpec(vehicle) {
+  const spec = { travelMode: "truck", vehicleCommercial: true };
+  if (vehicle.pesoTotalKg) spec.vehicleWeight = Math.round(vehicle.pesoTotalKg);
+  if (vehicle.comprimento) spec.vehicleLength = vehicle.comprimento;
+  if (vehicle.largura) spec.vehicleWidth = vehicle.largura;
+  if (vehicle.altura) spec.vehicleHeight = vehicle.altura;
+  return spec;
+}
+
 /* ---- Caminho 2: TomTom (matriz de distância real + rota com trânsito) ---- */
 async function optimizeGroupViaTomTom(depot, vehicle, stores, zona) {
-  const travelMode = vehicle.codigo === "TRUCK" ? "truck" : "car";
+  const vehicleSpec = tomtomVehicleSpec(vehicle);
   // separa em "lotes" já respeitando capacidade (mesma lógica de bin-packing do fallback local) —
   // a matriz do TomTom tem limite de tamanho, então cada rota candidata vira uma chamada pequena.
   const bins = binPackByCapacity(depot, vehicle, stores, zona);
@@ -662,14 +683,14 @@ async function optimizeGroupViaTomTom(depot, vehicle, stores, zona) {
 
   for (const bin of bins) {
     if (bin.length === 1) {
-      routes.push(await buildSingleStopTomTomRoute(depot, vehicle, bin, zona, travelMode));
+      routes.push(await buildSingleStopTomTomRoute(depot, vehicle, bin, zona, vehicleSpec));
       continue;
     }
     if (bin.length > 24) {
       // lote grande demais pra matriz síncrona — ordena por vizinho mais próximo (haversine) e
       // ainda assim busca a rota real (geometria/tempo) via Calculate Route.
       const ordered = enforceWindowOrder(twoOptStops(depot, nearestNeighborHaversine(depot, bin), (a, b) => haversineKm(a.lat, a.lng, b.lat, b.lng)));
-      routes.push(await buildTomTomRouteFromOrder(depot, vehicle, ordered, zona, travelMode));
+      routes.push(await buildTomTomRouteFromOrder(depot, vehicle, ordered, zona, vehicleSpec));
       continue;
     }
 
@@ -677,7 +698,7 @@ async function optimizeGroupViaTomTom(depot, vehicle, stores, zona) {
     const matrixPayload = {
       origins: points.map(p => ({ point: { latitude: p.lat, longitude: p.lng } })),
       destinations: points.map(p => ({ point: { latitude: p.lat, longitude: p.lng } })),
-      options: { departAt: "any", traffic: "historical", travelMode },
+      options: { departAt: "any", traffic: "historical", ...vehicleSpec },
     };
     const res = await fetch(TOMTOM_ENDPOINT, {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -714,21 +735,21 @@ async function optimizeGroupViaTomTom(depot, vehicle, stores, zona) {
     bin.forEach(s => { if (!ordered.includes(s)) ordered.push(s); });
     ordered = enforceWindowOrder(ordered);
 
-    routes.push(await buildTomTomRouteFromOrder(depot, vehicle, ordered, zona, travelMode));
+    routes.push(await buildTomTomRouteFromOrder(depot, vehicle, ordered, zona, vehicleSpec));
   }
 
   return routes;
 }
 
-async function buildSingleStopTomTomRoute(depot, vehicle, bin, zona, travelMode) {
+async function buildSingleStopTomTomRoute(depot, vehicle, bin, zona, vehicleSpec) {
   try {
-    return await buildTomTomRouteFromOrder(depot, vehicle, bin, zona, travelMode);
+    return await buildTomTomRouteFromOrder(depot, vehicle, bin, zona, vehicleSpec);
   } catch (e) {
     return buildRouteLocal(depot, vehicle, bin, zona);
   }
 }
 
-async function buildTomTomRouteFromOrder(depot, vehicle, orderedStores, zona, travelMode) {
+async function buildTomTomRouteFromOrder(depot, vehicle, orderedStores, zona, vehicleSpec) {
   const waypoints = [
     `${depot.lat},${depot.long}`,
     ...orderedStores.map(s => `${s.lat},${s.lng}`),
@@ -737,7 +758,7 @@ async function buildTomTomRouteFromOrder(depot, vehicle, orderedStores, zona, tr
 
   const res = await fetch(TOMTOM_ENDPOINT, {
     method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ op: "route", payload: { waypoints, travelMode } }),
+    body: JSON.stringify({ op: "route", payload: { waypoints, ...vehicleSpec } }),
   });
   const data = await res.json();
   if (!res.ok || data.error || !data.routes || !data.routes.length) {
@@ -1494,8 +1515,18 @@ function buildStopRowEl(s, i, route, opts) {
   const hClass = h ? (h.type === "exact" ? "exact" : h.type === "from" ? "from" : "") : "";
   const violado = s._horarioViolado ? " violado" : "";
 
+  // Setas de sequência: só fazem sentido dentro de uma rota de verdade (não no painel de
+  // encaixes, que ainda não tem posição nenhuma) — reordenam a entrega dentro da MESMA rota,
+  // sem precisar de arrastar (mais confiável que um drop pixel-perfeito numa lista estreita).
+  const reorderHtml = route ? `
+    <span class="stop-reorder">
+      <button class="stop-reorder-btn" type="button" data-dir="-1" title="Subir na sequência" ${i === 0 ? "disabled" : ""}>▲</button>
+      <button class="stop-reorder-btn" type="button" data-dir="1" title="Descer na sequência" ${i === route.stores.length - 1 ? "disabled" : ""}>▼</button>
+    </span>` : "";
+
   row.innerHTML = `
     <span class="stop-idx">${i + 1}</span>
+    ${reorderHtml}
     <span class="stop-name">${s.codigo}</span>
     <span class="stop-metric">${fmtNum(s.m3)} m³ · ${fmtNum(s.peso, 0)} kg</span>
     ${state.hasPalletData ? `<button class="stop-cam-btn" type="button" title="Ver/mover carga por câmara (congelado/resfriado/seco)">📦 ${s.palletTotal || 0}</button>` : ""}
@@ -1517,9 +1548,30 @@ function buildStopRowEl(s, i, route, opts) {
     toggleStopCamDetail(row, s, route);
   });
 
+  row.querySelectorAll(".stop-reorder-btn").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      reorderStopInRoute(route, s.id, parseInt(e.currentTarget.dataset.dir, 10));
+    });
+  });
+
   if (opts.onRowClick) row.addEventListener("click", () => opts.onRowClick(s, row));
 
   return row;
+}
+
+// Muda a ordem de entrega dentro da MESMA rota (troca com o vizinho na direção pedida). Igual a
+// mover pra outra rota, isso invalida a sequência/geometria calculada pelo ORS/TomTom — a rota
+// volta pra estimativa local até um "Reagrupar".
+function reorderStopInRoute(route, storeId, direction) {
+  if (!route) return;
+  const idx = route.stores.findIndex(s => s.id === storeId);
+  const newIdx = idx + direction;
+  if (idx === -1 || newIdx < 0 || newIdx >= route.stores.length) return;
+  [route.stores[idx], route.stores[newIdx]] = [route.stores[newIdx], route.stores[idx]];
+  if (route.engine === "ors" || route.engine === "tomtom") { route.engine = "local"; route.geometry = null; route.stepData = []; }
+  computeUsage();
+  renderAll();
 }
 
 let dragPayload = null;
@@ -2028,6 +2080,24 @@ function renderConfigTab() {
     tp.appendChild(tr);
   });
 
+  const tvd = document.querySelector("#tblVehicleDims tbody");
+  tvd.innerHTML = "";
+  state.config.vehicles.forEach(v => {
+    const tr = document.createElement("tr");
+    tr.innerHTML = `
+      <td>${v.codigo}</td>
+      <td><input type="number" value="${v.pesoTotalKg ?? 0}" data-k="pesoTotalKg" /></td>
+      <td><input type="number" step="0.1" value="${v.comprimento ?? 0}" data-k="comprimento" /></td>
+      <td><input type="number" step="0.1" value="${v.largura ?? 0}" data-k="largura" /></td>
+      <td><input type="number" step="0.1" value="${v.altura ?? 0}" data-k="altura" /></td>
+    `;
+    tr.querySelectorAll("input").forEach(inp => inp.addEventListener("change", (e) => {
+      v[e.target.dataset.k] = parseFloat(e.target.value) || 0;
+      saveConfig(); runClustering();
+    }));
+    tvd.appendChild(tr);
+  });
+
   const tud = document.querySelector("#tblZoneDepot tbody");
   tud.innerHTML = "";
   Object.keys(state.config.zoneDepot).sort().forEach(zona => {
@@ -2265,6 +2335,12 @@ function wireEvents() {
   });
   document.getElementById("swapModal").addEventListener("click", (e) => {
     if (e.target.id === "swapModal") document.getElementById("swapModal").classList.remove("show");
+  });
+  document.getElementById("swapToggleMap").addEventListener("click", (e) => {
+    const area = document.getElementById("swapMapArea");
+    const collapsed = area.classList.toggle("collapsed");
+    e.currentTarget.textContent = collapsed ? "▼ Mostrar mapa" : "▲ Ocultar mapa";
+    if (!collapsed && swapMiniMap) setTimeout(() => swapMiniMap.invalidateSize(), 50);
   });
 
   document.getElementById("btnNovaRota").addEventListener("click", () => {

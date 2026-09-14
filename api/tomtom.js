@@ -28,8 +28,20 @@ module.exports = async (req, res) => {
       };
     } else if (op === "route") {
       // payload.waypoints: string "lat,lon:lat,lon:..."
-      url = `https://api.tomtom.com/routing/1/calculateRoute/${payload.waypoints}/json` +
-        `?key=${apiKey}&routeType=fastest&traffic=true&travelMode=${payload.travelMode || "car"}`;
+      // Parâmetros de veículo comercial (peso/altura/largura/comprimento) fazem a rota evitar via
+      // com restrição de caminhão (viaduto baixo, ponte com limite de peso etc.) em vez de tratar
+      // a entrega como se fosse um carro — só entram na URL quando o app manda (todo veículo hoje
+      // é caminhão, então praticamente sempre entram).
+      const params = new URLSearchParams({
+        key: apiKey, routeType: "fastest", traffic: "true",
+        travelMode: payload.travelMode || "car",
+      });
+      if (payload.vehicleCommercial) params.set("vehicleCommercial", "true");
+      if (payload.vehicleWeight) params.set("vehicleWeight", String(payload.vehicleWeight));
+      if (payload.vehicleLength) params.set("vehicleLength", String(payload.vehicleLength));
+      if (payload.vehicleWidth) params.set("vehicleWidth", String(payload.vehicleWidth));
+      if (payload.vehicleHeight) params.set("vehicleHeight", String(payload.vehicleHeight));
+      url = `https://api.tomtom.com/routing/1/calculateRoute/${payload.waypoints}/json?${params.toString()}`;
       fetchOpts = { method: "GET" };
     } else {
       res.status(400).json({ error: "Parâmetro 'op' inválido. Use 'matrix' ou 'route'." });
