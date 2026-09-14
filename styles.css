@@ -192,6 +192,11 @@ button, input, select { font-family: inherit; }
   display: flex;
   gap: 8px;
   align-items: center;
+  flex-wrap: wrap;
+  position: sticky;
+  top: 0;
+  z-index: 8;
+  background: var(--surface);
 }
 .routes-toolbar input[type="text"] {
   flex: 1;
@@ -356,6 +361,9 @@ button, input, select { font-family: inherit; }
 .swap-col { overflow-y: auto; padding: 10px; min-height: 0; }
 .swap-col:first-child { border-right: 1px solid var(--border); }
 .swap-col-title { font-size: 11px; font-weight: 700; color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.04em; padding: 4px 4px 10px; }
+
+.swap-map-wrap { flex-shrink: 0; border-bottom: 1px solid var(--border); background: #dfe6ea; }
+#swapMiniMap { height: 190px; width: 100%; }
 @media (max-width: 720px) {
   .swap-modal-body { grid-template-columns: 1fr; }
   .swap-col:first-child { border-right: none; border-bottom: 1px solid var(--border); }

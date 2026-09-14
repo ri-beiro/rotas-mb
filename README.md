@@ -51,9 +51,11 @@ com a estimativa local, já que as funções serverless não existem fora de um 
    - distância e tempo reais de viagem (via TomTom, ou ORS se configurado).
 3. Revise no mapa e na lista de rotas — arraste uma loja de uma rota para outra se precisar
    ajustar (isso volta aquela rota para estimativa local, já que a sequência real precisaria
-   ser recalculada — use "Reagrupar" para mandar tudo de volta pra API). O botão "⇄ Trocar
-   lojas" abre duas cópias da lista de rotas lado a lado, com mais espaço pra arrastar entre
-   rotas distantes na lista.
+   ser recalculada — use "Reagrupar" para mandar tudo de volta pra API). A barra de busca/ações
+   fica fixa no topo da lista ao rolar. O botão "⇄ Trocar lojas" abre duas cópias da lista de
+   rotas lado a lado (cada uma expande/seleciona independente da outra) com mais espaço pra
+   arrastar entre rotas distantes na lista, mais um mapa pequeno das rotas em cima — clique numa
+   linha do mapa pra ver o nome da rota.
 4. Clique em "Exportar para o JDE" para gerar o CSV de retorno.
 
 ## Horário de entrega da loja (Call.ORDDETS1)

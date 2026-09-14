@@ -12,6 +12,9 @@ const state = {
   map: null,
   layers: { depots: null, routes: [], stops: [] },
   selectedRouteId: null,
+  // Expandir uma rota no modal "Trocar lojas" é independente por coluna — clicar numa rota na
+  // coluna A não expande/seleciona a mesma rota na coluna B, e vice-versa.
+  swapSelection: { A: null, B: null },
   colorByRoute: {},
   busy: false,
   _runToken: 0,
@@ -1341,13 +1344,15 @@ function renderRouteList() {
 // MESMOS dados (mesma referência de `route`, só o elemento DOM é outro): a lista lateral, e as
 // duas colunas espelhadas do modal "Trocar lojas entre rotas" — arrastar de uma coluna pra
 // outra funciona porque as duas leem/escrevem o mesmo `state.routes`, só a exibição é duplicada.
-function buildRouteCardEl(route) {
+function buildRouteCardEl(route, scope) {
+  scope = scope || "main";
+  const isOpen = scope === "main" ? route.id === state.selectedRouteId : route.id === state.swapSelection[scope];
   const color = state.colorByRoute[route.id];
   const overM3 = route.m3 > route.vehicle.m3;
   const overKg = route.kg > route.vehicle.kg;
 
   const card = document.createElement("div");
-  card.className = "route-card" + (route.id === state.selectedRouteId ? " open selected" : "") +
+  card.className = "route-card" + (isOpen ? " open selected" : "") +
     (route.engine === "unassigned" ? " route-danger" : "");
   card.dataset.routeId = route.id;
 
@@ -1400,7 +1405,10 @@ function buildRouteCardEl(route) {
   const stopsWrap = card.querySelector(".route-stops");
   route.stores.forEach((s, i) => stopsWrap.appendChild(buildStopRowEl(s, i, route)));
 
-  card.querySelector(".route-head").addEventListener("click", () => selectRoute(route.id));
+  card.querySelector(".route-head").addEventListener("click", () => {
+    if (scope === "main") selectRoute(route.id);
+    else selectRouteInSwap(route.id, scope);
+  });
 
   attachRouteCodeEditor(card.querySelector(".route-code"), route);
 
@@ -1436,8 +1444,16 @@ function selectRoute(routeId) {
   const wasSelected = state.selectedRouteId === routeId;
   state.selectedRouteId = wasSelected ? null : routeId;
   renderRouteList();
-  if (isSwapModalOpen()) renderSwapModal();
   if (wasSelected) renderMap(); else focusRouteOnMap(routeId);
+}
+
+// Expandir/selecionar uma rota DENTRO do modal "Trocar lojas" — cada coluna (A/B) guarda seu
+// próprio estado, então clicar numa rota na coluna A não mexe na coluna B (nem no mapa
+// principal por trás do modal, nem na lista lateral).
+function selectRouteInSwap(routeId, scope) {
+  const was = state.swapSelection[scope] === routeId;
+  state.swapSelection[scope] = was ? null : routeId;
+  renderSwapModal();
 }
 
 // Clicar no nome da rota vira um campo de texto editável — usado tanto pra renomear rotas
@@ -1559,12 +1575,67 @@ function updateSaPanel() {
 
 /* ---------------- Modal "Trocar lojas entre rotas" ---------------- */
 function renderSwapModal() {
-  ["swapListA", "swapListB"].forEach(id => {
+  [["swapListA", "A"], ["swapListB", "B"]].forEach(([id, scope]) => {
     const el = document.getElementById(id);
     if (!el) return;
     el.innerHTML = "";
-    state.routes.forEach(route => el.appendChild(buildRouteCardEl(route)));
+    state.routes.forEach(route => el.appendChild(buildRouteCardEl(route, scope)));
   });
+  renderSwapMiniMap();
+}
+
+/* ---------------- Mini-mapa do modal "Trocar lojas" ---------------- */
+// Mapa próprio (menor), só pra comparar visualmente as rotas enquanto arrasta lojas entre elas
+// — clicar numa linha mostra o nome da rota (popup) e destaca ela mais grossa.
+let swapMiniMap = null;
+let swapMiniMapHighlighted = null;
+function ensureSwapMiniMap() {
+  if (swapMiniMap) return;
+  try {
+    swapMiniMap = L.map("swapMiniMap", { zoomControl: false, attributionControl: false }).setView([-15.78, -47.93], 3.6);
+    L.tileLayer(
+      `https://api.mapbox.com/styles/v1/mapbox/light-v11/tiles/{z}/{x}/{y}@2x?access_token=${MAPBOX_TOKEN}`,
+      { maxZoom: 19, tileSize: 512, zoomOffset: -1 }
+    ).addTo(swapMiniMap);
+    swapMiniMap._routeLayers = [];
+  } catch (err) {
+    console.error("Falha ao iniciar o mini-mapa do modal 'Trocar lojas':", err);
+  }
+}
+
+function renderSwapMiniMap() {
+  ensureSwapMiniMap();
+  if (!swapMiniMap) return;
+  swapMiniMap._routeLayers.forEach(l => swapMiniMap.removeLayer(l));
+  swapMiniMap._routeLayers = [];
+
+  const bounds = [];
+  state.routes.forEach(route => {
+    if (!route.stores.length) return;
+    const color = state.colorByRoute[route.id];
+    const straightLatlngs = [[route.depot.lat, route.depot.long], ...route.stores.map(s => [s.lat, s.lng])];
+    const latlngs = route.geometry && route.geometry.length ? route.geometry : straightLatlngs;
+    const isHighlighted = swapMiniMapHighlighted === route.id;
+    const line = L.polyline(latlngs, {
+      color, weight: isHighlighted ? 5 : 2.5, opacity: isHighlighted ? 1 : 0.6,
+    }).addTo(swapMiniMap);
+    line._routeId = route.id;
+    line.bindPopup(`<b>${route.code || "(sem nome)"}</b><br>${route.stores.length} parada${route.stores.length === 1 ? "" : "s"}`);
+    // Só ajusta o estilo das linhas já existentes (setStyle), sem recriar os layers — recriar
+    // fecharia o popup que o próprio Leaflet acabou de abrir com esse mesmo clique.
+    line.on("click", () => {
+      swapMiniMapHighlighted = swapMiniMapHighlighted === route.id ? null : route.id;
+      swapMiniMap._routeLayers.forEach(l => {
+        const isH = l._routeId === swapMiniMapHighlighted;
+        l.setStyle({ weight: isH ? 5 : 2.5, opacity: isH ? 1 : 0.6 });
+      });
+    });
+    swapMiniMap._routeLayers.push(line);
+    latlngs.forEach(ll => bounds.push(ll));
+  });
+
+  if (bounds.length) swapMiniMap.fitBounds(bounds, { padding: [16, 16] });
+  setTimeout(() => swapMiniMap && swapMiniMap.invalidateSize(), 60);
 }
 
 /* ---------------- Janela de horário: edição inline (popover) ---------------- */
@@ -2133,8 +2204,8 @@ function wireEvents() {
 
   document.getElementById("btnGerenciarRotas").addEventListener("click", () => {
     if (!state.routes.length) { toast("Importe um pedido e gere as rotas primeiro.", ""); return; }
-    renderSwapModal();
     document.getElementById("swapModal").classList.add("show");
+    renderSwapModal();
   });
   document.getElementById("swapModalClose").addEventListener("click", () => {
     document.getElementById("swapModal").classList.remove("show");
